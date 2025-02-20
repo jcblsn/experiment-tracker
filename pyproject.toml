@@ -1,5 +1,5 @@
 [project]
-name = "model-evaluation"
+name = "experiment-tracker"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -21,6 +21,7 @@ packages = [
 [dependency-groups]
 dev = [
     "ipykernel>=6.29.5",
+    "matplotlib>=3.10.0",
     "numpy>=2.2.3",
 ]
 

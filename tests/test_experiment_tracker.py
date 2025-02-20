@@ -210,6 +210,44 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertAlmostEqual(metrics["mae"], mae, places=5)
         self.assertAlmostEqual(metrics["r2"], r2, places=5)
 
+    def test_get_experiment(self):
+        exp_name = "get_experiment_test"
+        exp_description = "Test experiment retrieval"
+        exp_id = self.tracker.create_experiment(exp_name, exp_description)
+        experiment = self.tracker.get_experiment(exp_id)
+        self.assertIsNotNone(experiment, "Experiment should be retrieved successfully")
+        self.assertEqual(experiment.get("name"), exp_name)
+        self.assertEqual(experiment.get("description"), exp_description)
+
+    def test_get_run_history(self):
+        exp_name = "run_history_test"
+        exp_id = self.tracker.create_experiment(exp_name)
+        run_ids = [self.tracker.start_run(exp_id) for _ in range(3)]
+        self.tracker.end_run(run_ids[1])
+        history = self.tracker.get_run_history(exp_id)
+        self.assertTrue(
+            len(history) >= 3, "Run history should contain at least three runs"
+        )
+        for run in history:
+            self.assertEqual(run["experiment_id"], exp_id)
+        start_times = [run["start_time"] for run in history]
+        self.assertEqual(
+            start_times,
+            sorted(start_times, reverse=True),
+            "Runs should be ordered by start_time descending",
+        )
+
+    def test_get_models(self):
+        exp_id = self.tracker.create_experiment("get_models_test")
+        run_id = self.tracker.start_run(exp_id)
+        params = {"alpha": 0.5, "l1_ratio": 0.7}
+        self.tracker.log_model(run_id, "TestModel", params)
+        models = self.tracker.get_models(run_id)
+        self.assertEqual(len(models), 1, "Should retrieve one model")
+        model = models[0]
+        self.assertEqual(model["name"], "TestModel")
+        self.assertEqual(model["parameters"], params, "Model parameters should match")
+
 
 if __name__ == "__main__":
     unittest.main()

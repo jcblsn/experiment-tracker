@@ -150,3 +150,60 @@ class ExperimentTracker:
             (status, error, run_id),
         )
         self.conn.commit()
+
+    def get_experiment(self, experiment_id: int) -> dict | None:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, name, description, created_at FROM experiments WHERE id = ?",
+            (experiment_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        columns = [col[0] for col in cursor.description]
+        return dict(zip(columns, row))
+
+    def get_run_history(self, experiment_id: int) -> list[dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, experiment_id, status, start_time, end_time, error FROM runs WHERE experiment_id = ? ORDER BY start_time DESC",
+            (experiment_id,),
+        )
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_models(self, run_id: int) -> list[dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, run_id, name, parameters, created_at FROM models WHERE run_id = ?",
+            (run_id,),
+        )
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        models = []
+        for row in rows:
+            entry = dict(zip(columns, row))
+            entry["parameters"] = json.loads(entry["parameters"])
+            models.append(entry)
+        return models
+
+    def get_predictions(self, run_id: int) -> dict | None:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT predictions, actuals FROM predictions WHERE run_id = ?", (run_id,)
+        )
+        result = cursor.fetchone()
+        if result is None:
+            raise ValueError(f"No predictions found for run id {run_id}")
+        preds = json.loads(result[0].decode("utf-8"))
+        actuals = json.loads(result[1].decode("utf-8"))
+        return {"predictions": preds, "actuals": actuals}
+
+    def get_metrics(self, run_id: int) -> dict:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT name, value FROM metrics WHERE run_id = ?", (run_id,))
+        rows = cursor.fetchall()
+        if not rows:
+            raise ValueError(f"No metrics found for run id {run_id}")
+        return {name: value for name, value in rows}

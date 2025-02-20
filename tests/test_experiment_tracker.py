@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -69,6 +70,25 @@ class TestExperimentTracker(unittest.TestCase):
         invalid_exp_id = 9999
         with self.assertRaises(sqlite3.IntegrityError):
             self.tracker.start_run(invalid_exp_id)
+
+    def test_log_model(self) -> None:
+        exp_id = self.tracker.create_experiment("model_logging_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_params = {"hidden_size": 128, "dropout": 0.2, "learning_rate": 0.001}
+        self.tracker.log_model(run_id, "test_model", test_params)
+
+        cursor = self.tracker.conn.cursor()
+        cursor.execute("SELECT name, parameters FROM models WHERE run_id=?", (run_id,))
+        result = cursor.fetchone()
+
+        self.assertIsNotNone(result, "Model record should exist")
+        self.assertEqual(result[0], "test_model", "Model name should match")
+        self.assertEqual(
+            json.loads(result[1]),
+            test_params,
+            "Parameters should match after deserialization",
+        )
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 
@@ -72,7 +73,13 @@ class ExperimentTracker:
         return cursor.lastrowid
 
     def log_model(self, run_id: int, name: str, params: dict) -> None:
-        pass
+        cursor = self.conn.cursor()
+        serialized_params = json.dumps(params)
+        cursor.execute(
+            "INSERT INTO models (run_id, name, parameters) VALUES (?, ?, ?)",
+            (run_id, name, serialized_params),
+        )
+        self.conn.commit()
 
     def log_predictions(
         self, run_id: int, preds: list[float], actuals: list[float]

@@ -90,6 +90,42 @@ class TestExperimentTracker(unittest.TestCase):
             "Parameters should match after deserialization",
         )
 
+    def test_log_predictions(self) -> None:
+        exp_id = self.tracker.create_experiment("prediction_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_preds = [0.1, 0.2, 0.3]
+        test_actuals = [0.15, 0.25, 0.35]
+        self.tracker.log_predictions(run_id, test_preds, test_actuals)
+
+        cursor = self.tracker.conn.cursor()
+        cursor.execute(
+            "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
+        )
+        result = cursor.fetchone()
+
+        self.assertIsNotNone(result, "Prediction record should exist")
+        self.assertEqual(
+            json.loads(result[0].decode("utf-8")),
+            test_preds,
+            "Predictions should match after deserialization",
+        )
+        self.assertEqual(
+            json.loads(result[1].decode("utf-8")),
+            test_actuals,
+            "Actuals should match after deserialization",
+        )
+
+    def test_log_predictions_validation(self) -> None:
+        exp_id = self.tracker.create_experiment("validation_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        with self.assertRaises(ValueError):
+            self.tracker.log_predictions(run_id, [1, 2], [1])  # mismatched lengths
+
+        with self.assertRaises(TypeError):
+            self.tracker.log_predictions(run_id, "not a list", [1])  # invalid type
+
 
 if __name__ == "__main__":
     unittest.main()

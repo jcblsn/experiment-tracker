@@ -84,7 +84,24 @@ class ExperimentTracker:
     def log_predictions(
         self, run_id: int, preds: list[float], actuals: list[float]
     ) -> None:
-        pass
+        if not isinstance(preds, list) or not isinstance(actuals, list):
+            raise TypeError("preds and actuals must be lists")
+        if len(preds) != len(actuals):
+            raise ValueError("preds and actuals must have the same length")
+
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM runs WHERE id = ?", (run_id,))
+        if cursor.fetchone() is None:
+            raise ValueError(f"Run ID {run_id} does not exist")
+
+        serialized_preds = json.dumps(preds).encode("utf-8")
+        serialized_actuals = json.dumps(actuals).encode("utf-8")
+
+        cursor.execute(
+            "INSERT INTO predictions (run_id, predictions, actuals) VALUES (?, ?, ?)",
+            (run_id, serialized_preds, serialized_actuals),
+        )
+        self.conn.commit()
 
     def end_run(self, run_id: int, success: bool = True, error: str = None) -> None:
         pass

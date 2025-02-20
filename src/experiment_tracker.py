@@ -4,6 +4,7 @@ import sqlite3
 class ExperimentTracker:
     def __init__(self, db_path: str = "experiments.db"):
         self.conn = sqlite3.connect(db_path)
+        self.conn.execute("PRAGMA foreign_keys = ON")
         self._initialize_db()
 
     def _initialize_db(self):
@@ -56,3 +57,23 @@ class ExperimentTracker:
         cursor.execute("INSERT INTO experiments (name) VALUES (?)", (name,))
         self.conn.commit()
         return cursor.lastrowid
+
+    def start_run(self, experiment_id: int) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "INSERT INTO runs (experiment_id, status, start_time) VALUES (?, 'RUNNING', CURRENT_TIMESTAMP)",
+            (experiment_id,),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def log_model(self, run_id: int, name: str, params: dict) -> None:
+        pass
+
+    def log_predictions(
+        self, run_id: int, preds: list[float], actuals: list[float]
+    ) -> None:
+        pass
+
+    def end_run(self, run_id: int, success: bool = True, error: str = None) -> None:
+        pass

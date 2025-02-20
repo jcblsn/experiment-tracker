@@ -155,6 +155,42 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertIsNotNone(result[1], "End time should be set")
         self.assertEqual(result[2], error_msg, "Error message should match input")
 
+    def test_full_workflow(self):
+        # create test data
+        exp_id = self.tracker.create_experiment("Integration Test")
+        run_id = self.tracker.start_run(exp_id)
+        test_params = {"kernel": "linear", "C": 1.0}
+        test_preds = [0.1, 0.2, 0.3]
+        test_actuals = [0.15, 0.25, 0.35]
+
+        # execute full workflow
+        self.tracker.log_model(run_id, "SVC", test_params)
+        self.tracker.log_predictions(run_id, test_preds, test_actuals)
+        self.tracker.end_run(run_id)
+
+        # verify all records
+        cursor = self.tracker.conn.cursor()
+
+        # check experiment
+        cursor.execute("SELECT name FROM experiments WHERE id=?", (exp_id,))
+        self.assertEqual(cursor.fetchone()[0], "Integration Test")
+
+        # check run status
+        cursor.execute("SELECT status FROM runs WHERE id=?", (run_id,))
+        self.assertEqual(cursor.fetchone()[0], "COMPLETED")
+
+        # check model params
+        cursor.execute("SELECT parameters FROM models WHERE run_id=?", (run_id,))
+        self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
+
+        # check predictions
+        cursor.execute(
+            "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
+        )
+        preds, actuals = cursor.fetchone()
+        self.assertEqual(json.loads(preds.decode()), test_preds)
+        self.assertEqual(json.loads(actuals.decode()), test_actuals)
+
 
 if __name__ == "__main__":
     unittest.main()

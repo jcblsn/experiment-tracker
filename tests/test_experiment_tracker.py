@@ -30,16 +30,23 @@ class TestExperimentTracker(unittest.TestCase):
 
     def test_create_experiment(self) -> None:
         exp_name = "test_experiment_1"
-        exp_id = self.tracker.create_experiment(exp_name)
+        exp_description = "Test experiment description"
+        exp_id = self.tracker.create_experiment(exp_name, exp_description)
         self.assertIsInstance(exp_id, int, "Should return integer ID")
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT name, created_at FROM experiments WHERE id=?", (exp_id,))
+        cursor.execute(
+            "SELECT name, description, created_at FROM experiments WHERE id=?",
+            (exp_id,),
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Experiment record should exist")
         self.assertEqual(result[0], exp_name, "Stored name should match input")
-        self.assertIsNotNone(result[1], "Should have creation timestamp")
+        self.assertEqual(
+            result[1], exp_description, "Stored description should match input"
+        )
+        self.assertIsNotNone(result[2], "Should have creation timestamp")
 
     def test_start_run_valid(self) -> None:
         exp_name = "experiment_for_run"

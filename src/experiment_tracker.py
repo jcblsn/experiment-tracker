@@ -14,6 +14,7 @@ class ExperimentTracker:
             CREATE TABLE IF NOT EXISTS experiments (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL,
+                description TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -52,9 +53,12 @@ class ExperimentTracker:
 
         self.conn.commit()
 
-    def create_experiment(self, name: str) -> int:
+    def create_experiment(self, name: str, description: str | None = None) -> int:
         cursor = self.conn.cursor()
-        cursor.execute("INSERT INTO experiments (name) VALUES (?)", (name,))
+        cursor.execute(
+            "INSERT INTO experiments (name, description) VALUES (?, ?)",
+            (name, description),
+        )
         self.conn.commit()
         return cursor.lastrowid
 

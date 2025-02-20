@@ -1,5 +1,8 @@
 # experiment-tracker
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CI](https://github.com/jcblsn/experiment-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/jcblsn/experiment-tracker/actions/workflows/ci.yml)
+
 ## Overview
 
 A very lightweight alternative to MLFlow's experiment tracking capabilities.

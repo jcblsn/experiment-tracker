@@ -91,7 +91,7 @@ class ExperimentTracker:
         )
         self.conn.commit()
 
-    def calculate_default_metrics(
+    def _calculate_default_metrics(
         self, run_id: int, preds: list[float], actuals: list[float]
     ) -> None:
         n = len(preds)
@@ -132,7 +132,7 @@ class ExperimentTracker:
             (run_id, serialized_preds, serialized_actuals),
         )
 
-        self.calculate_default_metrics(run_id, preds, actuals)
+        self._calculate_default_metrics(run_id, preds, actuals)
 
         self.conn.commit()
 

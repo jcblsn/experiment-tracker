@@ -156,40 +156,59 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(result[2], error_msg, "Error message should match input")
 
     def test_full_workflow(self):
-        # create test data
         exp_id = self.tracker.create_experiment("Integration Test")
         run_id = self.tracker.start_run(exp_id)
         test_params = {"kernel": "linear", "C": 1.0}
         test_preds = [0.1, 0.2, 0.3]
         test_actuals = [0.15, 0.25, 0.35]
 
-        # execute full workflow
         self.tracker.log_model(run_id, "SVC", test_params)
         self.tracker.log_predictions(run_id, test_preds, test_actuals)
         self.tracker.end_run(run_id)
 
-        # verify all records
         cursor = self.tracker.conn.cursor()
-
-        # check experiment
         cursor.execute("SELECT name FROM experiments WHERE id=?", (exp_id,))
         self.assertEqual(cursor.fetchone()[0], "Integration Test")
 
-        # check run status
         cursor.execute("SELECT status FROM runs WHERE id=?", (run_id,))
         self.assertEqual(cursor.fetchone()[0], "COMPLETED")
 
-        # check model params
         cursor.execute("SELECT parameters FROM models WHERE run_id=?", (run_id,))
         self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
 
-        # check predictions
         cursor.execute(
             "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
         )
-        preds, actuals = cursor.fetchone()
-        self.assertEqual(json.loads(preds.decode()), test_preds)
-        self.assertEqual(json.loads(actuals.decode()), test_actuals)
+        preds_blob, actuals_blob = cursor.fetchone()
+        self.assertEqual(json.loads(preds_blob.decode("utf-8")), test_preds)
+        self.assertEqual(json.loads(actuals_blob.decode("utf-8")), test_actuals)
+
+    def test_calculate_metrics(self):
+        exp_id = self.tracker.create_experiment("metrics_test")
+        run_id = self.tracker.start_run(exp_id)
+        preds = [1.0, 2.0, 3.0]
+        actuals = [1.1, 1.9, 3.05]
+        import math
+
+        n = len(preds)
+        rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
+        mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
+        mean_actual = sum(actuals) / n
+        ss_tot = sum((a - mean_actual) ** 2 for a in actuals)
+        r2 = (
+            1 - (sum((a - p) ** 2 for p, a in zip(preds, actuals)) / ss_tot)
+            if ss_tot != 0
+            else 0
+        )
+        self.tracker.log_predictions(run_id, preds, actuals)
+        cursor = self.tracker.conn.cursor()
+        cursor.execute("SELECT name, value FROM metrics WHERE run_id=?", (run_id,))
+        rows = cursor.fetchall()
+        self.assertEqual(len(rows), 3, "Should insert three metrics entries")
+        metrics = {name: value for name, value in rows}
+        self.assertAlmostEqual(metrics["rmse"], rmse, places=5)
+        self.assertAlmostEqual(metrics["mae"], mae, places=5)
+        self.assertAlmostEqual(metrics["r2"], r2, places=5)
 
 
 if __name__ == "__main__":

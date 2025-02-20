@@ -116,6 +116,16 @@ class TestExperimentTracker(unittest.TestCase):
             "Actuals should match after deserialization",
         )
 
+    def test_metrics_table_exists(self):
+        """Ensure that the metrics table exists in the database."""
+        cursor = self.tracker.conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name='metrics'
+        """)
+        result = cursor.fetchone()
+        self.assertIsNotNone(result, "Metrics table should exist in the database")
+
     def test_log_predictions_validation(self) -> None:
         exp_id = self.tracker.create_experiment("validation_test")
         run_id = self.tracker.start_run(exp_id)

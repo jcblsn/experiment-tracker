@@ -1,4 +1,5 @@
 import json
+import math
 import sqlite3
 
 
@@ -51,6 +52,15 @@ class ExperimentTracker:
                 FOREIGN KEY (run_id) REFERENCES runs(id)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS metrics (
+                run_id INTEGER,
+                name TEXT NOT NULL,
+                value REAL NOT NULL,
+                UNIQUE(run_id, name),
+                FOREIGN KEY (run_id) REFERENCES runs(id)
+            )
+        """)
 
         self.conn.commit()
 
@@ -81,6 +91,26 @@ class ExperimentTracker:
         )
         self.conn.commit()
 
+    def calculate_default_metrics(
+        self, run_id: int, preds: list[float], actuals: list[float]
+    ) -> None:
+        n = len(preds)
+        rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
+
+        mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
+
+        mean_actual = sum(actuals) / n
+        ss_tot = sum((a - mean_actual) ** 2 for a in actuals)
+        ss_res = sum((a - p) ** 2 for a, p in zip(actuals, preds))
+        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
+
+        cursor = self.conn.cursor()
+        metrics = [("rmse", rmse), ("mae", mae), ("r2", r2)]
+        cursor.executemany(
+            "INSERT INTO metrics (run_id, name, value) VALUES (?, ?, ?)",
+            [(run_id, name, value) for name, value in metrics],
+        )
+
     def log_predictions(
         self, run_id: int, preds: list[float], actuals: list[float]
     ) -> None:
@@ -101,6 +131,9 @@ class ExperimentTracker:
             "INSERT INTO predictions (run_id, predictions, actuals) VALUES (?, ?, ?)",
             (run_id, serialized_preds, serialized_actuals),
         )
+
+        self.calculate_default_metrics(run_id, preds, actuals)
+
         self.conn.commit()
 
     def end_run(

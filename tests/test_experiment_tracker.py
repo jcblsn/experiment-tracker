@@ -126,6 +126,35 @@ class TestExperimentTracker(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.tracker.log_predictions(run_id, "not a list", [1])  # invalid type
 
+    def test_end_run_success(self) -> None:
+        exp_id = self.tracker.create_experiment("success_test")
+        run_id = self.tracker.start_run(exp_id)
+        self.tracker.end_run(run_id)
+
+        cursor = self.tracker.conn.cursor()
+        cursor.execute("SELECT status, end_time, error FROM runs WHERE id=?", (run_id,))
+        result = cursor.fetchone()
+
+        self.assertIsNotNone(result, "Run record should exist")
+        self.assertEqual(result[0], "COMPLETED", "Status should be COMPLETED")
+        self.assertIsNotNone(result[1], "End time should be set")
+        self.assertIsNone(result[2], "Error should be null for successful run")
+
+    def test_end_run_failure(self) -> None:
+        exp_id = self.tracker.create_experiment("failure_test")
+        run_id = self.tracker.start_run(exp_id)
+        error_msg = "Division by zero error"
+        self.tracker.end_run(run_id, success=False, error=error_msg)
+
+        cursor = self.tracker.conn.cursor()
+        cursor.execute("SELECT status, end_time, error FROM runs WHERE id=?", (run_id,))
+        result = cursor.fetchone()
+
+        self.assertIsNotNone(result, "Run record should exist")
+        self.assertEqual(result[0], "FAILED", "Status should be FAILED")
+        self.assertIsNotNone(result[1], "End time should be set")
+        self.assertEqual(result[2], error_msg, "Error message should match input")
+
 
 if __name__ == "__main__":
     unittest.main()

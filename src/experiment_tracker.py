@@ -103,5 +103,17 @@ class ExperimentTracker:
         )
         self.conn.commit()
 
-    def end_run(self, run_id: int, success: bool = True, error: str = None) -> None:
-        pass
+    def end_run(
+        self, run_id: int, success: bool = True, error: str | None = None
+    ) -> None:
+        cursor = self.conn.cursor()
+        status = "COMPLETED" if success else "FAILED"
+        cursor.execute(
+            """UPDATE runs
+            SET status = ?,
+                end_time = CURRENT_TIMESTAMP,
+                error = ?
+            WHERE id = ?""",
+            (status, error, run_id),
+        )
+        self.conn.commit()

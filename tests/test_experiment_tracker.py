@@ -101,12 +101,12 @@ class TestExperimentTracker(unittest.TestCase):
         cursor = self.tracker.conn.cursor()
         cursor.execute(
             "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id",
-            (run_id,)
+            (run_id,),
         )
         results = cursor.fetchall()
 
         self.assertEqual(len(results), 3, "Should have 3 individual prediction records")
-        
+
         for i, (pred, actual) in enumerate(results):
             self.assertEqual(pred, test_preds[i], f"Prediction {i} should match")
             self.assertEqual(actual, test_actuals[i], f"Actual {i} should match")
@@ -120,21 +120,21 @@ class TestExperimentTracker(unittest.TestCase):
         """)
         result = cursor.fetchone()
         self.assertIsNotNone(result, "Metrics table should exist in the database")
-        
+
     def test_get_predictions(self):
         exp_id = self.tracker.create_experiment("get_predictions_test")
         run_id = self.tracker.start_run(exp_id)
-        
+
         test_preds = [0.1, 0.2, 0.3]
         test_actuals = [0.15, 0.25, 0.35]
         self.tracker.log_predictions(run_id, test_preds, test_actuals)
-        
+
         result = self.tracker.get_predictions(run_id)
-        
+
         self.assertIn("predictions", result)
         self.assertIn("actuals", result)
         self.assertIn("timestamps", result)
-        
+
         self.assertEqual(result["predictions"], test_preds)
         self.assertEqual(result["actuals"], test_actuals)
         self.assertEqual(len(result["timestamps"]), 3)
@@ -200,13 +200,14 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
 
         cursor.execute(
-            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id", (run_id,)
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id",
+            (run_id,),
         )
         results = cursor.fetchall()
-        
+
         stored_preds = [row[0] for row in results]
         stored_actuals = [row[1] for row in results]
-        
+
         self.assertEqual(stored_preds, test_preds)
         self.assertEqual(stored_actuals, test_actuals)
 
@@ -236,6 +237,52 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertAlmostEqual(metrics["rmse"], rmse, places=5)
         self.assertAlmostEqual(metrics["mae"], mae, places=5)
         self.assertAlmostEqual(metrics["r2"], r2, places=5)
+
+    def test_custom_metrics(self):
+        exp_id = self.tracker.create_experiment("custom_metrics_test")
+        run_id = self.tracker.start_run(exp_id)
+        preds = [1.0, 2.0, 3.0, 4.0]
+        actuals = [1.1, 1.9, 3.05, 3.9]
+
+        def max_error(preds, actuals):
+            return max(abs(p - a) for p, a in zip(preds, actuals))
+
+        def bias(preds, actuals):
+            return sum(p - a for p, a in zip(preds, actuals)) / len(preds)
+
+        custom_metrics = {"max_error": max_error, "bias": bias}
+
+        expected_max_error = max(abs(p - a) for p, a in zip(preds, actuals))
+        expected_bias = sum(p - a for p, a in zip(preds, actuals)) / len(preds)
+
+        self.tracker.log_predictions(
+            run_id, preds, actuals, custom_metrics=custom_metrics
+        )
+
+        metrics = self.tracker.get_metrics(run_id)
+
+        self.assertIn("rmse", metrics)
+        self.assertIn("mae", metrics)
+        self.assertIn("r2", metrics)
+
+        self.assertIn("max_error", metrics)
+        self.assertIn("bias", metrics)
+        self.assertAlmostEqual(metrics["max_error"], expected_max_error, places=5)
+        self.assertAlmostEqual(metrics["bias"], expected_bias, places=5)
+
+    def test_log_metric_directly(self):
+        exp_id = self.tracker.create_experiment("direct_metric_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        self.tracker.log_metric(run_id, "accuracy", 0.95)
+        self.tracker.log_metric(run_id, "f1_score", 0.92)
+
+        self.tracker.log_metric(run_id, "accuracy", 0.96)
+
+        metrics = self.tracker.get_metrics(run_id)
+
+        self.assertEqual(metrics["accuracy"], 0.96)
+        self.assertEqual(metrics["f1_score"], 0.92)
 
     def test_get_experiment(self):
         exp_name = "get_experiment_test"

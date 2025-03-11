@@ -17,10 +17,22 @@ def main() -> None:
     tracker.log_model(run_id, "ExampleModel", model_params)
     print("Logged model")
 
+    def max_error(preds, actuals):
+        return max(abs(p - a) for p, a in zip(preds, actuals))
+
+    def median_error(preds, actuals):
+        errors = sorted(abs(p - a) for p, a in zip(preds, actuals))
+        mid = len(errors) // 2
+        return (
+            errors[mid] if len(errors) % 2 == 1 else (errors[mid - 1] + errors[mid]) / 2
+        )
+
+    custom_metrics = {"max_error": max_error, "median_error": median_error}
+
     preds = [0.1, 0.2, 0.3]
     actuals = [0.15, 0.25, 0.35]
-    tracker.log_predictions(run_id, preds, actuals)
-    print("Logged predictions")
+    tracker.log_predictions(run_id, preds, actuals, custom_metrics=custom_metrics)
+    print("Logged predictions with custom metrics")
 
     tracker.end_run(run_id)
     print("Ended run")

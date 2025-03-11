@@ -93,6 +93,15 @@ class ExperimentTracker:
         )
         self.conn.commit()
 
+    def _log_metric(self, run_id: int, name: str, value: float) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO metrics (run_id, name, value)
+               VALUES (?, ?, ?)
+               ON CONFLICT(run_id, name) DO UPDATE SET value = ?""",
+            (run_id, name, value, value),
+        )
+
     def _calculate_default_metrics(
         self, run_id: int, preds: list[float], actuals: list[float]
     ) -> None:
@@ -105,12 +114,9 @@ class ExperimentTracker:
         ss_res = sum((a - p) ** 2 for a, p in zip(actuals, preds))
         r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
 
-        cursor = self.conn.cursor()
         metrics = [("rmse", rmse), ("mae", mae), ("r2", r2)]
-        cursor.executemany(
-            "INSERT INTO metrics (run_id, name, value) VALUES (?, ?, ?)",
-            [(run_id, name, value) for name, value in metrics],
-        )
+        for name, value in metrics:
+            self._log_metric(run_id, name, value)
 
     def log_predictions(
         self,
@@ -211,6 +217,10 @@ class ExperimentTracker:
         timestamps = [row[2] for row in results]
 
         return {"predictions": preds, "actuals": actuals, "timestamps": timestamps}
+
+    def log_metric(self, run_id: int, name: str, value: float) -> None:
+        self._log_metric(run_id, name, value)
+        self.conn.commit()
 
     def get_metrics(self, run_id: int) -> dict:
         cursor = self.conn.cursor()

@@ -1,7 +1,10 @@
+import csv
 import json
 import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -283,6 +286,138 @@ class TestExperimentTracker(unittest.TestCase):
 
         self.assertEqual(metrics["accuracy"], 0.96)
         self.assertEqual(metrics["f1_score"], 0.92)
+
+    def test_export_experiment(self):
+        export_dir = tempfile.mkdtemp()
+        try:
+            exp_id = self.tracker.create_experiment(
+                "Export Test", "Testing export functionality"
+            )
+
+            run_id1 = self.tracker.start_run(exp_id)
+            self.tracker.log_model(
+                run_id1, "TestModel", {"param1": 1, "param2": "test"}
+            )
+            preds1 = [0.1, 0.2, 0.3]
+            actuals1 = [0.15, 0.25, 0.35]
+            self.tracker.log_predictions(run_id1, preds1, actuals1)
+            self.tracker.log_metric(run_id1, "custom_metric", 0.95)
+            self.tracker.end_run(run_id1)
+
+            run_id2 = self.tracker.start_run(exp_id)
+            self.tracker.log_model(
+                run_id2, "TestModel2", {"param1": 2, "param2": "test2"}
+            )
+            self.tracker.end_run(run_id2, success=False, error="Test error")
+
+            export_path = self.tracker.export_experiment(exp_id, export_dir)
+
+            self.assertTrue(os.path.exists(export_path))
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "experiments.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "runs.csv")))
+            self.assertTrue(os.path.exists(os.path.join(export_path, "models.csv")))
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "predictions.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "metrics.csv")))
+
+            with open(os.path.join(export_path, "experiments.csv"), "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                self.assertEqual(headers, ["id", "name", "description", "created_at"])
+
+            with open(os.path.join(export_path, "runs.csv"), "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                self.assertEqual(
+                    headers,
+                    [
+                        "id",
+                        "experiment_id",
+                        "status",
+                        "start_time",
+                        "end_time",
+                        "error",
+                    ],
+                )
+                rows = list(reader)
+                self.assertEqual(len(rows), 2)
+
+            with open(os.path.join(export_path, "models.csv"), "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                self.assertEqual(
+                    headers, ["id", "run_id", "name", "parameters", "created_at"]
+                )
+                rows = list(reader)
+                self.assertEqual(len(rows), 2)
+
+        finally:
+            shutil.rmtree(export_dir)
+
+    def test_import_experiment(self):
+        export_dir = tempfile.mkdtemp()
+        try:
+            source_tracker = ExperimentTracker(":memory:")
+            exp_id = source_tracker.create_experiment(
+                "Import Test", "Testing import functionality"
+            )
+
+            run_id = source_tracker.start_run(exp_id)
+            source_tracker.log_model(run_id, "ImportModel", {"learning_rate": 0.01})
+            preds = [0.1, 0.2, 0.3]
+            actuals = [0.15, 0.25, 0.35]
+            source_tracker.log_predictions(run_id, preds, actuals)
+            source_tracker.log_metric(run_id, "custom_score", 0.88)
+            source_tracker.end_run(run_id)
+
+            export_path = source_tracker.export_experiment(exp_id, export_dir)
+
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "experiments.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "runs.csv")))
+            self.assertTrue(os.path.exists(os.path.join(export_path, "models.csv")))
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "predictions.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "metrics.csv")))
+
+            target_tracker = ExperimentTracker(":memory:")
+            new_exp_id = target_tracker.import_experiment(export_path)
+
+            imported_exp = target_tracker.get_experiment(new_exp_id)
+            self.assertEqual(imported_exp["name"], "Import Test")
+            self.assertEqual(
+                imported_exp["description"], "Testing import functionality"
+            )
+
+            runs = target_tracker.get_run_history(new_exp_id)
+            self.assertEqual(len(runs), 1)
+
+            new_run_id = runs[0]["id"]
+            models = target_tracker.get_models(new_run_id)
+            self.assertEqual(len(models), 1)
+            self.assertEqual(models[0]["name"], "ImportModel")
+            self.assertEqual(models[0]["parameters"]["learning_rate"], 0.01)
+
+            predictions = target_tracker.get_predictions(new_run_id)
+            self.assertEqual(predictions["predictions"], preds)
+            self.assertEqual(predictions["actuals"], actuals)
+
+            metrics = target_tracker.get_metrics(new_run_id)
+            self.assertTrue("rmse" in metrics)
+            self.assertTrue("mae" in metrics)
+            self.assertTrue("r2" in metrics)
+            self.assertTrue("custom_score" in metrics)
+            self.assertEqual(metrics["custom_score"], 0.88)
+
+        finally:
+            source_tracker.conn.close()
+            target_tracker.conn.close()
+            shutil.rmtree(export_dir)
 
     def test_get_experiment(self):
         exp_name = "get_experiment_test"

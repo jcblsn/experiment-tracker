@@ -1,5 +1,7 @@
+import csv
 import json
 import math
+import os
 import sqlite3
 
 
@@ -229,3 +231,212 @@ class ExperimentTracker:
         if not rows:
             raise ValueError(f"No metrics found for run id {run_id}")
         return {name: value for name, value in rows}
+
+    def export_experiment(self, experiment_id: int, export_dir: str) -> str:
+        if not os.path.exists(export_dir):
+            os.makedirs(export_dir)
+
+        experiment = self.get_experiment(experiment_id)
+        if experiment is None:
+            raise ValueError(f"Experiment ID {experiment_id} does not exist")
+
+        exp_name = experiment["name"].replace(" ", "_")
+        exp_export_dir = os.path.join(
+            export_dir, f"experiment_{experiment_id}_{exp_name}"
+        )
+        os.makedirs(exp_export_dir, exist_ok=True)
+
+        with open(
+            os.path.join(exp_export_dir, "experiments.csv"), "w", newline=""
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "name", "description", "created_at"])
+            writer.writerow(
+                [
+                    experiment["id"],
+                    experiment["name"],
+                    experiment["description"] or "",
+                    experiment["created_at"],
+                ]
+            )
+
+        runs = self.get_run_history(experiment_id)
+
+        with open(os.path.join(exp_export_dir, "runs.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                ["id", "experiment_id", "status", "start_time", "end_time", "error"]
+            )
+            for run in runs:
+                writer.writerow(
+                    [
+                        run["id"],
+                        experiment_id,
+                        run["status"],
+                        run["start_time"],
+                        run["end_time"] or "",
+                        run["error"] or "",
+                    ]
+                )
+
+        with open(os.path.join(exp_export_dir, "models.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "run_id", "name", "parameters", "created_at"])
+
+        with open(
+            os.path.join(exp_export_dir, "predictions.csv"), "w", newline=""
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "prediction", "actual", "timestamp"])
+
+        with open(os.path.join(exp_export_dir, "metrics.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "name", "value"])
+
+        for run in runs:
+            run_id = run["id"]
+
+            try:
+                models = self.get_models(run_id)
+                with open(
+                    os.path.join(exp_export_dir, "models.csv"), "a", newline=""
+                ) as f:
+                    writer = csv.writer(f)
+                    for model in models:
+                        writer.writerow(
+                            [
+                                model["id"],
+                                run_id,
+                                model["name"],
+                                json.dumps(model["parameters"]),
+                                model["created_at"],
+                            ]
+                        )
+            except Exception:
+                pass
+
+            try:
+                predictions = self.get_predictions(run_id)
+                with open(
+                    os.path.join(exp_export_dir, "predictions.csv"), "a", newline=""
+                ) as f:
+                    writer = csv.writer(f)
+                    for i in range(len(predictions["predictions"])):
+                        writer.writerow(
+                            [
+                                run_id,
+                                predictions["predictions"][i],
+                                predictions["actuals"][i],
+                                predictions["timestamps"][i]
+                                if i < len(predictions["timestamps"])
+                                else "",
+                            ]
+                        )
+            except Exception:
+                pass
+
+            try:
+                metrics = self.get_metrics(run_id)
+                with open(
+                    os.path.join(exp_export_dir, "metrics.csv"), "a", newline=""
+                ) as f:
+                    writer = csv.writer(f)
+                    for name, value in metrics.items():
+                        writer.writerow([run_id, name, value])
+            except Exception:
+                pass
+
+        return exp_export_dir
+
+    def import_experiment(self, import_dir: str) -> int:
+        if not os.path.exists(import_dir):
+            raise ValueError(f"Import directory {import_dir} does not exist")
+
+        exp_file = os.path.join(import_dir, "experiments.csv")
+        if not os.path.exists(exp_file):
+            raise ValueError(f"experiments.csv not found in {import_dir}")
+
+        with open(exp_file, "r", newline="") as f:
+            reader = csv.reader(f)
+            next(reader)
+            row = next(reader)
+            exp_name = row[1]
+            exp_description = row[2] if row[2] else None
+
+        experiment_id = self.create_experiment(exp_name, exp_description)
+
+        runs_file = os.path.join(import_dir, "runs.csv")
+        if not os.path.exists(runs_file):
+            return experiment_id
+
+        run_id_map = {}
+
+        with open(runs_file, "r", newline="") as f:
+            reader = csv.reader(f)
+            next(reader)
+            for row in reader:
+                original_run_id = int(row[0])
+                status = row[2]
+                error = row[5] if len(row) > 5 and row[5] else None
+
+                run_id = self.start_run(experiment_id)
+                run_id_map[original_run_id] = run_id
+
+                if status != "RUNNING":
+                    self.end_run(run_id, success=(status == "COMPLETED"), error=error)
+
+        models_file = os.path.join(import_dir, "models.csv")
+        if os.path.exists(models_file):
+            with open(models_file, "r", newline="") as f:
+                reader = csv.reader(f)
+                next(reader)
+                for row in reader:
+                    original_run_id = int(row[1])
+                    if original_run_id in run_id_map:
+                        new_run_id = run_id_map[original_run_id]
+                        model_name = row[2]
+                        parameters = json.loads(row[3])
+                        self.log_model(new_run_id, model_name, parameters)
+
+        predictions_file = os.path.join(import_dir, "predictions.csv")
+        if os.path.exists(predictions_file):
+            prediction_data = {}
+
+            with open(predictions_file, "r", newline="") as f:
+                reader = csv.reader(f)
+                next(reader)
+                for row in reader:
+                    original_run_id = int(row[0])
+                    if original_run_id in run_id_map:
+                        if original_run_id not in prediction_data:
+                            prediction_data[original_run_id] = {
+                                "preds": [],
+                                "actuals": [],
+                            }
+
+                        prediction_data[original_run_id]["preds"].append(float(row[1]))
+                        prediction_data[original_run_id]["actuals"].append(
+                            float(row[2])
+                        )
+
+            for original_run_id, data in prediction_data.items():
+                new_run_id = run_id_map[original_run_id]
+                if data["preds"] and data["actuals"]:
+                    self.log_predictions(new_run_id, data["preds"], data["actuals"])
+
+        metrics_file = os.path.join(import_dir, "metrics.csv")
+        if os.path.exists(metrics_file):
+            with open(metrics_file, "r", newline="") as f:
+                reader = csv.reader(f)
+                next(reader)
+                for row in reader:
+                    original_run_id = int(row[0])
+                    if original_run_id in run_id_map:
+                        new_run_id = run_id_map[original_run_id]
+                        metric_name = row[1]
+                        metric_value = float(row[2])
+
+                        if metric_name not in ["rmse", "mae", "r2"]:
+                            self.log_metric(new_run_id, metric_name, metric_value)
+
+        return experiment_id

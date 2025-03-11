@@ -224,22 +224,14 @@ class TestExperimentTracker(unittest.TestCase):
         n = len(preds)
         rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
-        mean_actual = sum(actuals) / n
-        ss_tot = sum((a - mean_actual) ** 2 for a in actuals)
-        r2 = (
-            1 - (sum((a - p) ** 2 for p, a in zip(preds, actuals)) / ss_tot)
-            if ss_tot != 0
-            else 0
-        )
         self.tracker.log_predictions(run_id, preds, actuals)
         cursor = self.tracker.conn.cursor()
         cursor.execute("SELECT name, value FROM metrics WHERE run_id=?", (run_id,))
         rows = cursor.fetchall()
-        self.assertEqual(len(rows), 3, "Should insert three metrics entries")
+        self.assertEqual(len(rows), 2, "Should insert two metrics entries")
         metrics = {name: value for name, value in rows}
         self.assertAlmostEqual(metrics["rmse"], rmse, places=5)
         self.assertAlmostEqual(metrics["mae"], mae, places=5)
-        self.assertAlmostEqual(metrics["r2"], r2, places=5)
 
     def test_custom_metrics(self):
         exp_id = self.tracker.create_experiment("custom_metrics_test")
@@ -266,7 +258,6 @@ class TestExperimentTracker(unittest.TestCase):
 
         self.assertIn("rmse", metrics)
         self.assertIn("mae", metrics)
-        self.assertIn("r2", metrics)
 
         self.assertIn("max_error", metrics)
         self.assertIn("bias", metrics)
@@ -410,7 +401,6 @@ class TestExperimentTracker(unittest.TestCase):
             metrics = target_tracker.get_metrics(new_run_id)
             self.assertTrue("rmse" in metrics)
             self.assertTrue("mae" in metrics)
-            self.assertTrue("r2" in metrics)
             self.assertTrue("custom_score" in metrics)
             self.assertEqual(metrics["custom_score"], 0.88)
 

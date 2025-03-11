@@ -121,12 +121,7 @@ class ExperimentTracker:
         rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
 
-        mean_actual = sum(actuals) / n
-        ss_tot = sum((a - mean_actual) ** 2 for a in actuals)
-        ss_res = sum((a - p) ** 2 for a, p in zip(actuals, preds))
-        r2 = 1 - (ss_res / ss_tot) if ss_tot != 0 else 0
-
-        metrics = [("rmse", rmse), ("mae", mae), ("r2", r2)]
+        metrics = [("rmse", rmse), ("mae", mae)]
         for name, value in metrics:
             self._log_metric(run_id, name, value)
 
@@ -565,7 +560,7 @@ class ExperimentTracker:
                         metric_name = row[1]
                         metric_value = float(row[2])
 
-                        if metric_name not in ["rmse", "mae", "r2"]:
+                        if metric_name not in ["rmse", "mae"]:
                             self.log_metric(new_run_id, metric_name, metric_value)
 
         tags_file = os.path.join(import_dir, "tags.csv")

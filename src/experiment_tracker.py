@@ -66,6 +66,16 @@ class ExperimentTracker:
             )
         """)
 
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY,
+                entity_type TEXT CHECK(entity_type IN ('experiment', 'run')),
+                entity_id INTEGER,
+                name TEXT NOT NULL,
+                value TEXT
+            )
+        """)
+
         self.conn.commit()
 
     def create_experiment(self, name: str, description: str | None = None) -> int:
@@ -232,6 +242,83 @@ class ExperimentTracker:
             raise ValueError(f"No metrics found for run id {run_id}")
         return {name: value for name, value in rows}
 
+    def add_tag(
+        self, entity_type: str, entity_id: int, tag_name: str, tag_value: str = ""
+    ) -> int:
+        if entity_type not in ["experiment", "run"]:
+            raise ValueError("entity_type must be either 'experiment' or 'run'")
+
+        cursor = self.conn.cursor()
+        if entity_type == "experiment":
+            cursor.execute("SELECT id FROM experiments WHERE id = ?", (entity_id,))
+        else:
+            cursor.execute("SELECT id FROM runs WHERE id = ?", (entity_id,))
+
+        if cursor.fetchone() is None:
+            raise ValueError(
+                f"{entity_type.capitalize()} with ID {entity_id} does not exist"
+            )
+
+        cursor.execute(
+            "INSERT INTO tags (entity_type, entity_id, name, value) VALUES (?, ?, ?, ?)",
+            (entity_type, entity_id, tag_name, tag_value),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_tags(self, entity_type: str, entity_id: int) -> dict:
+        if entity_type not in ["experiment", "run"]:
+            raise ValueError("entity_type must be either 'experiment' or 'run'")
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT name, value FROM tags WHERE entity_type = ? AND entity_id = ?",
+            (entity_type, entity_id),
+        )
+        return {name: value for name, value in cursor.fetchall()}
+
+    def get_tagged_entities(
+        self, entity_type: str, tag_name: str, tag_value: str = None
+    ) -> list:
+        if entity_type not in ["experiment", "run"]:
+            raise ValueError("entity_type must be either 'experiment' or 'run'")
+
+        cursor = self.conn.cursor()
+        if tag_value is None:
+            cursor.execute(
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND name = ?",
+                (entity_type, tag_name),
+            )
+        else:
+            cursor.execute(
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND name = ? AND value = ?",
+                (entity_type, tag_name, tag_value),
+            )
+
+        return [row[0] for row in cursor.fetchall()]
+
+    def delete_tag(
+        self, entity_type: str, entity_id: int, tag_name: str, tag_value: str = None
+    ) -> int:
+        if entity_type not in ["experiment", "run"]:
+            raise ValueError("entity_type must be either 'experiment' or 'run'")
+
+        cursor = self.conn.cursor()
+        if tag_value is None:
+            cursor.execute(
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ?",
+                (entity_type, entity_id, tag_name),
+            )
+        else:
+            cursor.execute(
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ? AND value = ?",
+                (entity_type, entity_id, tag_name, tag_value),
+            )
+
+        deleted_count = cursor.rowcount
+        self.conn.commit()
+        return deleted_count
+
     def export_experiment(self, experiment_id: int, export_dir: str) -> str:
         if not os.path.exists(export_dir):
             os.makedirs(export_dir)
@@ -293,6 +380,10 @@ class ExperimentTracker:
             writer = csv.writer(f)
             writer.writerow(["run_id", "name", "value"])
 
+        with open(os.path.join(exp_export_dir, "tags.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "entity_type", "entity_id", "name", "value"])
+
         for run in runs:
             run_id = run["id"]
 
@@ -345,6 +436,44 @@ class ExperimentTracker:
                         writer.writerow([run_id, name, value])
             except Exception:
                 pass
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT id, entity_type, entity_id, name, value FROM tags WHERE entity_type = 'experiment' AND entity_id = ?",
+                (experiment_id,),
+            )
+            experiment_tags = cursor.fetchall()
+
+            if experiment_tags:
+                with open(
+                    os.path.join(exp_export_dir, "tags.csv"), "a", newline=""
+                ) as f:
+                    writer = csv.writer(f)
+                    for tag in experiment_tags:
+                        writer.writerow(tag)
+        except Exception:
+            pass
+
+        try:
+            for run in runs:
+                run_id = run["id"]
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "SELECT id, entity_type, entity_id, name, value FROM tags WHERE entity_type = 'run' AND entity_id = ?",
+                    (run_id,),
+                )
+                run_tags = cursor.fetchall()
+
+                if run_tags:
+                    with open(
+                        os.path.join(exp_export_dir, "tags.csv"), "a", newline=""
+                    ) as f:
+                        writer = csv.writer(f)
+                        for tag in run_tags:
+                            writer.writerow(tag)
+        except Exception:
+            pass
 
         return exp_export_dir
 
@@ -438,5 +567,25 @@ class ExperimentTracker:
 
                         if metric_name not in ["rmse", "mae", "r2"]:
                             self.log_metric(new_run_id, metric_name, metric_value)
+
+        tags_file = os.path.join(import_dir, "tags.csv")
+        if os.path.exists(tags_file):
+            with open(tags_file, "r", newline="") as f:
+                reader = csv.reader(f)
+                next(reader)
+                for row in reader:
+                    entity_type = row[1]
+                    original_entity_id = int(row[2])
+                    tag_name = row[3]
+                    tag_value = row[4] if len(row) > 4 and row[4] else ""
+
+                    if entity_type == "experiment":
+                        new_entity_id = experiment_id
+                    elif entity_type == "run" and original_entity_id in run_id_map:
+                        new_entity_id = run_id_map[original_entity_id]
+                    else:
+                        continue
+
+                    self.add_tag(entity_type, new_entity_id, tag_name, tag_value)
 
         return experiment_id

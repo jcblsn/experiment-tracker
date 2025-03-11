@@ -34,6 +34,18 @@ def main() -> None:
     preds = [0.1, 0.2, 0.3]
     actuals = [0.15, 0.25, 0.35]
     tracker.log_predictions(run_id, preds, actuals, custom_metrics=custom_metrics)
+
+    tracker.add_tag("experiment", exp_id, "project", "demo")
+    tracker.add_tag("experiment", exp_id, "version", "1.0")
+    tracker.add_tag("run", run_id, "model_type", "simple")
+    tracker.add_tag("run", run_id, "dataset", "synthetic")
+    print("Added tags to experiment and run")
+
+    exp_tags = tracker.get_tags("experiment", exp_id)
+    run_tags = tracker.get_tags("run", run_id)
+    print(f"Experiment tags: {exp_tags}")
+    print(f"Run tags: {run_tags}")
+
     tracker.end_run(run_id)
 
     run_id2 = tracker.start_run(exp_id)

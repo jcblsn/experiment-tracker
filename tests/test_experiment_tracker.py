@@ -419,6 +419,79 @@ class TestExperimentTracker(unittest.TestCase):
             target_tracker.conn.close()
             shutil.rmtree(export_dir)
 
+    def test_tags(self):
+        exp_id = self.tracker.create_experiment("Tag Test", "Testing tag functionality")
+        run_id = self.tracker.start_run(exp_id)
+
+        self.tracker.add_tag("experiment", exp_id, "version", "v1.0")
+        self.tracker.add_tag("experiment", exp_id, "owner", "test_user")
+        self.tracker.add_tag("experiment", exp_id, "priority", "high")
+
+        self.tracker.add_tag("run", run_id, "model_type", "regression")
+        self.tracker.add_tag("run", run_id, "dataset", "test_data")
+
+        exp_tags = self.tracker.get_tags("experiment", exp_id)
+        self.assertEqual(len(exp_tags), 3)
+        self.assertEqual(exp_tags["version"], "v1.0")
+        self.assertEqual(exp_tags["owner"], "test_user")
+        self.assertEqual(exp_tags["priority"], "high")
+
+        run_tags = self.tracker.get_tags("run", run_id)
+        self.assertEqual(len(run_tags), 2)
+        self.assertEqual(run_tags["model_type"], "regression")
+        self.assertEqual(run_tags["dataset"], "test_data")
+
+        tagged_experiments = self.tracker.get_tagged_entities(
+            "experiment", "priority", "high"
+        )
+        self.assertIn(exp_id, tagged_experiments)
+
+        tagged_runs = self.tracker.get_tagged_entities(
+            "run", "model_type", "regression"
+        )
+        self.assertIn(run_id, tagged_runs)
+
+        deleted = self.tracker.delete_tag("experiment", exp_id, "priority")
+        self.assertEqual(deleted, 1)
+
+        exp_tags_after_delete = self.tracker.get_tags("experiment", exp_id)
+        self.assertEqual(len(exp_tags_after_delete), 2)
+        self.assertNotIn("priority", exp_tags_after_delete)
+
+    def test_export_import_tags(self):
+        export_dir = tempfile.mkdtemp()
+        try:
+            source_tracker = ExperimentTracker(":memory:")
+            exp_id = source_tracker.create_experiment("Tag Export Test")
+            run_id = source_tracker.start_run(exp_id)
+
+            source_tracker.add_tag("experiment", exp_id, "category", "test")
+            source_tracker.add_tag("run", run_id, "algorithm", "random_forest")
+
+            source_tracker.end_run(run_id)
+            export_path = source_tracker.export_experiment(exp_id, export_dir)
+
+            self.assertTrue(os.path.exists(os.path.join(export_path, "tags.csv")))
+
+            target_tracker = ExperimentTracker(":memory:")
+            new_exp_id = target_tracker.import_experiment(export_path)
+
+            runs = target_tracker.get_run_history(new_exp_id)
+            new_run_id = runs[0]["id"]
+
+            exp_tags = target_tracker.get_tags("experiment", new_exp_id)
+            self.assertEqual(exp_tags["category"], "test")
+
+            run_tags = target_tracker.get_tags("run", new_run_id)
+            self.assertEqual(run_tags["algorithm"], "random_forest")
+
+        finally:
+            if "source_tracker" in locals():
+                source_tracker.conn.close()
+            if "target_tracker" in locals():
+                target_tracker.conn.close()
+            shutil.rmtree(export_dir)
+
     def test_get_experiment(self):
         exp_name = "get_experiment_test"
         exp_description = "Test experiment retrieval"

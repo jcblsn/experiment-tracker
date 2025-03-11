@@ -100,21 +100,16 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id",
+            (run_id,)
         )
-        result = cursor.fetchone()
+        results = cursor.fetchall()
 
-        self.assertIsNotNone(result, "Prediction record should exist")
-        self.assertEqual(
-            json.loads(result[0].decode("utf-8")),
-            test_preds,
-            "Predictions should match after deserialization",
-        )
-        self.assertEqual(
-            json.loads(result[1].decode("utf-8")),
-            test_actuals,
-            "Actuals should match after deserialization",
-        )
+        self.assertEqual(len(results), 3, "Should have 3 individual prediction records")
+        
+        for i, (pred, actual) in enumerate(results):
+            self.assertEqual(pred, test_preds[i], f"Prediction {i} should match")
+            self.assertEqual(actual, test_actuals[i], f"Actual {i} should match")
 
     def test_metrics_table_exists(self):
         """Ensure that the metrics table exists in the database."""
@@ -125,6 +120,24 @@ class TestExperimentTracker(unittest.TestCase):
         """)
         result = cursor.fetchone()
         self.assertIsNotNone(result, "Metrics table should exist in the database")
+        
+    def test_get_predictions(self):
+        exp_id = self.tracker.create_experiment("get_predictions_test")
+        run_id = self.tracker.start_run(exp_id)
+        
+        test_preds = [0.1, 0.2, 0.3]
+        test_actuals = [0.15, 0.25, 0.35]
+        self.tracker.log_predictions(run_id, test_preds, test_actuals)
+        
+        result = self.tracker.get_predictions(run_id)
+        
+        self.assertIn("predictions", result)
+        self.assertIn("actuals", result)
+        self.assertIn("timestamps", result)
+        
+        self.assertEqual(result["predictions"], test_preds)
+        self.assertEqual(result["actuals"], test_actuals)
+        self.assertEqual(len(result["timestamps"]), 3)
 
     def test_log_predictions_validation(self) -> None:
         exp_id = self.tracker.create_experiment("validation_test")
@@ -187,11 +200,15 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
 
         cursor.execute(
-            "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id", (run_id,)
         )
-        preds_blob, actuals_blob = cursor.fetchone()
-        self.assertEqual(json.loads(preds_blob.decode("utf-8")), test_preds)
-        self.assertEqual(json.loads(actuals_blob.decode("utf-8")), test_actuals)
+        results = cursor.fetchall()
+        
+        stored_preds = [row[0] for row in results]
+        stored_actuals = [row[1] for row in results]
+        
+        self.assertEqual(stored_preds, test_preds)
+        self.assertEqual(stored_actuals, test_actuals)
 
     def test_calculate_metrics(self):
         exp_id = self.tracker.create_experiment("metrics_test")

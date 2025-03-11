@@ -46,9 +46,11 @@ class ExperimentTracker:
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
+                id INTEGER PRIMARY KEY,
                 run_id INTEGER,
-                predictions BLOB,
-                actuals BLOB,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                prediction REAL,
+                actual REAL,
                 FOREIGN KEY (run_id) REFERENCES runs(id)
             )
         """)
@@ -96,7 +98,6 @@ class ExperimentTracker:
     ) -> None:
         n = len(preds)
         rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
-
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
 
         mean_actual = sum(actuals) / n
@@ -112,7 +113,11 @@ class ExperimentTracker:
         )
 
     def log_predictions(
-        self, run_id: int, preds: list[float], actuals: list[float]
+        self,
+        run_id: int,
+        preds: list[float],
+        actuals: list[float],
+        custom_metrics: dict[str, callable] | None = None,
     ) -> None:
         if not isinstance(preds, list) or not isinstance(actuals, list):
             raise TypeError("preds and actuals must be lists")
@@ -124,15 +129,18 @@ class ExperimentTracker:
         if cursor.fetchone() is None:
             raise ValueError(f"Run ID {run_id} does not exist")
 
-        serialized_preds = json.dumps(preds).encode("utf-8")
-        serialized_actuals = json.dumps(actuals).encode("utf-8")
-
-        cursor.execute(
-            "INSERT INTO predictions (run_id, predictions, actuals) VALUES (?, ?, ?)",
-            (run_id, serialized_preds, serialized_actuals),
-        )
+        for pred, actual in zip(preds, actuals):
+            cursor.execute(
+                "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
+                (run_id, pred, actual),
+            )
 
         self._calculate_default_metrics(run_id, preds, actuals)
+
+        if custom_metrics:
+            for name, metric_fn in custom_metrics.items():
+                value = metric_fn(preds, actuals)
+                self._log_metric(run_id, name, value)
 
         self.conn.commit()
 
@@ -188,17 +196,21 @@ class ExperimentTracker:
             models.append(entry)
         return models
 
-    def get_predictions(self, run_id: int) -> dict | None:
+    def get_predictions(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT predictions, actuals FROM predictions WHERE run_id = ?", (run_id,)
+            "SELECT prediction, actual, timestamp FROM predictions WHERE run_id = ? ORDER BY timestamp",
+            (run_id,),
         )
-        result = cursor.fetchone()
-        if result is None:
+        results = cursor.fetchall()
+        if not results:
             raise ValueError(f"No predictions found for run id {run_id}")
-        preds = json.loads(result[0].decode("utf-8"))
-        actuals = json.loads(result[1].decode("utf-8"))
-        return {"predictions": preds, "actuals": actuals}
+
+        preds = [row[0] for row in results]
+        actuals = [row[1] for row in results]
+        timestamps = [row[2] for row in results]
+
+        return {"predictions": preds, "actuals": actuals, "timestamps": timestamps}
 
     def get_metrics(self, run_id: int) -> dict:
         cursor = self.conn.cursor()

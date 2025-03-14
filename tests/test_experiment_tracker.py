@@ -3,11 +3,9 @@ import json
 import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.experiment_tracker import ExperimentTracker
 
 

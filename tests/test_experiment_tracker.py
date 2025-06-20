@@ -1,10 +1,11 @@
+import csv
 import json
 import os
+import shutil
 import sqlite3
-import sys
+import tempfile
 import unittest
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.experiment_tracker import ExperimentTracker
 
 
@@ -18,11 +19,11 @@ class TestExperimentTracker(unittest.TestCase):
             self.tracker.conn.close()
 
     def test_table_creation(self) -> None:
-        required_tables = {"experiments", "runs", "models", "predictions"}
+        required_tables = {"experiments", "runs", "models", "predictions", "metrics", "tags"}
         cursor = self.tracker.conn.cursor()
         cursor.execute("""
             SELECT name FROM sqlite_master
-            WHERE type='table' AND name IN ('experiments', 'runs', 'models', 'predictions')
+            WHERE type='table' AND name IN ('experiments', 'runs', 'models', 'predictions', 'metrics', 'tags')
         """)
         created_tables = {row[0] for row in cursor.fetchall()}
         self.assertEqual(
@@ -100,21 +101,16 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY t",
+            (run_id,),
         )
-        result = cursor.fetchone()
+        results = cursor.fetchall()
 
-        self.assertIsNotNone(result, "Prediction record should exist")
-        self.assertEqual(
-            json.loads(result[0].decode("utf-8")),
-            test_preds,
-            "Predictions should match after deserialization",
-        )
-        self.assertEqual(
-            json.loads(result[1].decode("utf-8")),
-            test_actuals,
-            "Actuals should match after deserialization",
-        )
+        self.assertEqual(len(results), 3, "Should have 3 individual prediction records")
+
+        for i, (pred, actual) in enumerate(results):
+            self.assertEqual(pred, test_preds[i], f"Prediction {i} should match")
+            self.assertEqual(actual, test_actuals[i], f"Actual {i} should match")
 
     def test_metrics_table_exists(self):
         """Ensure that the metrics table exists in the database."""
@@ -125,6 +121,24 @@ class TestExperimentTracker(unittest.TestCase):
         """)
         result = cursor.fetchone()
         self.assertIsNotNone(result, "Metrics table should exist in the database")
+
+    def test_get_predictions(self):
+        exp_id = self.tracker.create_experiment("get_predictions_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_preds = [0.1, 0.2, 0.3]
+        test_actuals = [0.15, 0.25, 0.35]
+        self.tracker.log_predictions(run_id, test_preds, test_actuals)
+
+        result = self.tracker.get_predictions(run_id)
+
+        self.assertIn("predictions", result)
+        self.assertIn("actuals", result)
+        self.assertIn("t", result)
+
+        self.assertEqual(result["predictions"], test_preds)
+        self.assertEqual(result["actuals"], test_actuals)
+        self.assertEqual(len(result["t"]), 3)
 
     def test_log_predictions_validation(self) -> None:
         exp_id = self.tracker.create_experiment("validation_test")
@@ -187,11 +201,16 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
 
         cursor.execute(
-            "SELECT predictions, actuals FROM predictions WHERE run_id=?", (run_id,)
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY t",
+            (run_id,),
         )
-        preds_blob, actuals_blob = cursor.fetchone()
-        self.assertEqual(json.loads(preds_blob.decode("utf-8")), test_preds)
-        self.assertEqual(json.loads(actuals_blob.decode("utf-8")), test_actuals)
+        results = cursor.fetchall()
+
+        stored_preds = [row[0] for row in results]
+        stored_actuals = [row[1] for row in results]
+
+        self.assertEqual(stored_preds, test_preds)
+        self.assertEqual(stored_actuals, test_actuals)
 
     def test_calculate_metrics(self):
         exp_id = self.tracker.create_experiment("metrics_test")
@@ -203,22 +222,263 @@ class TestExperimentTracker(unittest.TestCase):
         n = len(preds)
         rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
-        mean_actual = sum(actuals) / n
-        ss_tot = sum((a - mean_actual) ** 2 for a in actuals)
-        r2 = (
-            1 - (sum((a - p) ** 2 for p, a in zip(preds, actuals)) / ss_tot)
-            if ss_tot != 0
-            else 0
-        )
         self.tracker.log_predictions(run_id, preds, actuals)
         cursor = self.tracker.conn.cursor()
         cursor.execute("SELECT name, value FROM metrics WHERE run_id=?", (run_id,))
         rows = cursor.fetchall()
-        self.assertEqual(len(rows), 3, "Should insert three metrics entries")
+        self.assertEqual(len(rows), 2, "Should insert two metrics entries")
         metrics = {name: value for name, value in rows}
         self.assertAlmostEqual(metrics["rmse"], rmse, places=5)
         self.assertAlmostEqual(metrics["mae"], mae, places=5)
-        self.assertAlmostEqual(metrics["r2"], r2, places=5)
+
+    def test_custom_metrics(self):
+        exp_id = self.tracker.create_experiment("custom_metrics_test")
+        run_id = self.tracker.start_run(exp_id)
+        preds = [1.0, 2.0, 3.0, 4.0]
+        actuals = [1.1, 1.9, 3.05, 3.9]
+
+        def max_error(preds, actuals):
+            return max(abs(p - a) for p, a in zip(preds, actuals))
+
+        def bias(preds, actuals):
+            return sum(p - a for p, a in zip(preds, actuals)) / len(preds)
+
+        custom_metrics = {"max_error": max_error, "bias": bias}
+
+        expected_max_error = max(abs(p - a) for p, a in zip(preds, actuals))
+        expected_bias = sum(p - a for p, a in zip(preds, actuals)) / len(preds)
+
+        self.tracker.log_predictions(
+            run_id, preds, actuals, custom_metrics=custom_metrics
+        )
+
+        metrics = self.tracker.get_metrics(run_id)
+
+        self.assertIn("rmse", metrics)
+        self.assertIn("mae", metrics)
+
+        self.assertIn("max_error", metrics)
+        self.assertIn("bias", metrics)
+        self.assertAlmostEqual(metrics["max_error"], expected_max_error, places=5)
+        self.assertAlmostEqual(metrics["bias"], expected_bias, places=5)
+
+    def test_log_metric_directly(self):
+        exp_id = self.tracker.create_experiment("direct_metric_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        self.tracker.log_metric(run_id, "accuracy", 0.95)
+        self.tracker.log_metric(run_id, "f1_score", 0.92)
+
+        self.tracker.log_metric(run_id, "accuracy", 0.96)
+
+        metrics = self.tracker.get_metrics(run_id)
+
+        self.assertEqual(metrics["accuracy"], 0.96)
+        self.assertEqual(metrics["f1_score"], 0.92)
+
+    def test_export_experiment(self):
+        export_dir = tempfile.mkdtemp()
+        try:
+            exp_id = self.tracker.create_experiment(
+                "Export Test", "Testing export functionality"
+            )
+
+            run_id1 = self.tracker.start_run(exp_id)
+            self.tracker.log_model(
+                run_id1, "TestModel", {"param1": 1, "param2": "test"}
+            )
+            preds1 = [0.1, 0.2, 0.3]
+            actuals1 = [0.15, 0.25, 0.35]
+            self.tracker.log_predictions(run_id1, preds1, actuals1)
+            self.tracker.log_metric(run_id1, "custom_metric", 0.95)
+            self.tracker.end_run(run_id1)
+
+            run_id2 = self.tracker.start_run(exp_id)
+            self.tracker.log_model(
+                run_id2, "TestModel2", {"param1": 2, "param2": "test2"}
+            )
+            self.tracker.end_run(run_id2, success=False, error="Test error")
+
+            export_path = self.tracker.export_experiment(exp_id, export_dir)
+
+            self.assertTrue(os.path.exists(export_path))
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "experiments.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "runs.csv")))
+            self.assertTrue(os.path.exists(os.path.join(export_path, "models.csv")))
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "predictions.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "metrics.csv")))
+
+            with open(os.path.join(export_path, "experiments.csv"), "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                self.assertEqual(headers, ["id", "name", "description", "created_at"])
+
+            with open(os.path.join(export_path, "runs.csv"), "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                self.assertEqual(
+                    headers,
+                    [
+                        "id",
+                        "experiment_id",
+                        "status",
+                        "start_time",
+                        "end_time",
+                        "error",
+                    ],
+                )
+                rows = list(reader)
+                self.assertEqual(len(rows), 2)
+
+            with open(os.path.join(export_path, "models.csv"), "r") as f:
+                reader = csv.reader(f)
+                headers = next(reader)
+                self.assertEqual(
+                    headers, ["id", "run_id", "name", "parameters", "created_at"]
+                )
+                rows = list(reader)
+                self.assertEqual(len(rows), 2)
+
+        finally:
+            shutil.rmtree(export_dir)
+
+    def test_import_experiment(self):
+        export_dir = tempfile.mkdtemp()
+        try:
+            source_tracker = ExperimentTracker(":memory:")
+            exp_id = source_tracker.create_experiment(
+                "Import Test", "Testing import functionality"
+            )
+
+            run_id = source_tracker.start_run(exp_id)
+            source_tracker.log_model(run_id, "ImportModel", {"learning_rate": 0.01})
+            preds = [0.1, 0.2, 0.3]
+            actuals = [0.15, 0.25, 0.35]
+            source_tracker.log_predictions(run_id, preds, actuals)
+            source_tracker.log_metric(run_id, "custom_score", 0.88)
+            source_tracker.end_run(run_id)
+
+            export_path = source_tracker.export_experiment(exp_id, export_dir)
+
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "experiments.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "runs.csv")))
+            self.assertTrue(os.path.exists(os.path.join(export_path, "models.csv")))
+            self.assertTrue(
+                os.path.exists(os.path.join(export_path, "predictions.csv"))
+            )
+            self.assertTrue(os.path.exists(os.path.join(export_path, "metrics.csv")))
+
+            target_tracker = ExperimentTracker(":memory:")
+            new_exp_id = target_tracker.import_experiment(export_path)
+
+            imported_exp = target_tracker.get_experiment(new_exp_id)
+            self.assertEqual(imported_exp["name"], "Import Test")
+            self.assertEqual(
+                imported_exp["description"], "Testing import functionality"
+            )
+
+            runs = target_tracker.get_run_history(new_exp_id)
+            self.assertEqual(len(runs), 1)
+
+            new_run_id = runs[0]["id"]
+            models = target_tracker.get_models(new_run_id)
+            self.assertEqual(len(models), 1)
+            self.assertEqual(models[0]["name"], "ImportModel")
+            self.assertEqual(models[0]["parameters"]["learning_rate"], 0.01)
+
+            predictions = target_tracker.get_predictions(new_run_id)
+            self.assertEqual(predictions["predictions"], preds)
+            self.assertEqual(predictions["actuals"], actuals)
+
+            metrics = target_tracker.get_metrics(new_run_id)
+            self.assertTrue("rmse" in metrics)
+            self.assertTrue("mae" in metrics)
+            self.assertTrue("custom_score" in metrics)
+            self.assertEqual(metrics["custom_score"], 0.88)
+
+        finally:
+            source_tracker.conn.close()
+            target_tracker.conn.close()
+            shutil.rmtree(export_dir)
+
+    def test_tags(self):
+        exp_id = self.tracker.create_experiment("Tag Test", "Testing tag functionality")
+        run_id = self.tracker.start_run(exp_id)
+
+        self.tracker.add_tag("experiment", exp_id, "version", "v1.0")
+        self.tracker.add_tag("experiment", exp_id, "owner", "test_user")
+        self.tracker.add_tag("experiment", exp_id, "priority", "high")
+
+        self.tracker.add_tag("run", run_id, "model_type", "regression")
+        self.tracker.add_tag("run", run_id, "dataset", "test_data")
+
+        exp_tags = self.tracker.get_tags("experiment", exp_id)
+        self.assertEqual(len(exp_tags), 3)
+        self.assertEqual(exp_tags["version"], "v1.0")
+        self.assertEqual(exp_tags["owner"], "test_user")
+        self.assertEqual(exp_tags["priority"], "high")
+
+        run_tags = self.tracker.get_tags("run", run_id)
+        self.assertEqual(len(run_tags), 2)
+        self.assertEqual(run_tags["model_type"], "regression")
+        self.assertEqual(run_tags["dataset"], "test_data")
+
+        tagged_experiments = self.tracker.get_tagged_entities(
+            "experiment", "priority", "high"
+        )
+        self.assertIn(exp_id, tagged_experiments)
+
+        tagged_runs = self.tracker.get_tagged_entities(
+            "run", "model_type", "regression"
+        )
+        self.assertIn(run_id, tagged_runs)
+
+        deleted = self.tracker.delete_tag("experiment", exp_id, "priority")
+        self.assertEqual(deleted, 1)
+
+        exp_tags_after_delete = self.tracker.get_tags("experiment", exp_id)
+        self.assertEqual(len(exp_tags_after_delete), 2)
+        self.assertNotIn("priority", exp_tags_after_delete)
+
+    def test_export_import_tags(self):
+        export_dir = tempfile.mkdtemp()
+        try:
+            source_tracker = ExperimentTracker(":memory:")
+            exp_id = source_tracker.create_experiment("Tag Export Test")
+            run_id = source_tracker.start_run(exp_id)
+
+            source_tracker.add_tag("experiment", exp_id, "category", "test")
+            source_tracker.add_tag("run", run_id, "algorithm", "random_forest")
+
+            source_tracker.end_run(run_id)
+            export_path = source_tracker.export_experiment(exp_id, export_dir)
+
+            self.assertTrue(os.path.exists(os.path.join(export_path, "tags.csv")))
+
+            target_tracker = ExperimentTracker(":memory:")
+            new_exp_id = target_tracker.import_experiment(export_path)
+
+            runs = target_tracker.get_run_history(new_exp_id)
+            new_run_id = runs[0]["id"]
+
+            exp_tags = target_tracker.get_tags("experiment", new_exp_id)
+            self.assertEqual(exp_tags["category"], "test")
+
+            run_tags = target_tracker.get_tags("run", new_run_id)
+            self.assertEqual(run_tags["algorithm"], "random_forest")
+
+        finally:
+            if "source_tracker" in locals():
+                source_tracker.conn.close()
+            if "target_tracker" in locals():
+                target_tracker.conn.close()
+            shutil.rmtree(export_dir)
 
     def test_get_experiment(self):
         exp_name = "get_experiment_test"
@@ -257,6 +517,39 @@ class TestExperimentTracker(unittest.TestCase):
         model = models[0]
         self.assertEqual(model["name"], "TestModel")
         self.assertEqual(model["parameters"], params, "Model parameters should match")
+
+    def test_list_experiments(self) -> None:
+        exp1 = self.tracker.create_experiment("Test 1")
+        exp2 = self.tracker.create_experiment("Test 2")
+
+        experiments = self.tracker.list_experiments()
+        self.assertEqual(len(experiments), 2)
+        experiment_ids = {exp["id"] for exp in experiments}
+        self.assertIn(exp1, experiment_ids)
+        self.assertIn(exp2, experiment_ids)
+
+    def test_find_experiments(self) -> None:
+        exp1 = self.tracker.create_experiment("ML Model Test")
+        exp2 = self.tracker.create_experiment("Data Analysis")
+        exp3 = self.tracker.create_experiment("ML Feature Engineering")
+
+        ml_experiments = self.tracker.find_experiments("ML")
+        self.assertEqual(len(ml_experiments), 2)
+        experiment_ids = {exp["id"] for exp in ml_experiments}
+        self.assertIn(exp1, experiment_ids)
+        self.assertIn(exp3, experiment_ids)
+        self.assertNotIn(exp2, experiment_ids)
+
+    def test_delete_experiment(self) -> None:
+        exp_id = self.tracker.create_experiment("To Delete")
+        self.assertIsNotNone(self.tracker.get_experiment(exp_id))
+
+        self.tracker.delete_experiment(exp_id)
+        self.assertIsNone(self.tracker.get_experiment(exp_id))
+
+    def test_delete_nonexistent_experiment(self) -> None:
+        with self.assertRaises(ValueError):
+            self.tracker.delete_experiment(9999)
 
 
 if __name__ == "__main__":

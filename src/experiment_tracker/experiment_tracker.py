@@ -50,7 +50,7 @@ class ExperimentTracker:
             CREATE TABLE IF NOT EXISTS predictions (
                 id INTEGER PRIMARY KEY,
                 run_id INTEGER,
-                t TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                idx INTEGER,
                 prediction REAL,
                 actual REAL,
                 FOREIGN KEY (run_id) REFERENCES runs(id)
@@ -130,23 +130,33 @@ class ExperimentTracker:
         run_id: int,
         preds: list[float],
         actuals: list[float],
+        index: list[int] | None = None,
         custom_metrics: dict[str, callable] | None = None,
     ) -> None:
         if not isinstance(preds, list) or not isinstance(actuals, list):
             raise TypeError("preds and actuals must be lists")
         if len(preds) != len(actuals):
             raise ValueError("preds and actuals must have the same length")
+        if index is not None and len(index) != len(preds):
+            raise ValueError("index must have the same length as preds and actuals")
 
         cursor = self.conn.cursor()
         cursor.execute("SELECT id FROM runs WHERE id = ?", (run_id,))
         if cursor.fetchone() is None:
             raise ValueError(f"Run ID {run_id} does not exist")
 
-        for pred, actual in zip(preds, actuals):
-            cursor.execute(
-                "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
-                (run_id, pred, actual),
-            )
+        if index is None:
+            for pred, actual in zip(preds, actuals):
+                cursor.execute(
+                    "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
+                    (run_id, pred, actual),
+                )
+        else:
+            for pred, actual, idx in zip(preds, actuals, index):
+                cursor.execute(
+                    "INSERT INTO predictions (run_id, idx, prediction, actual) VALUES (?, ?, ?, ?)",
+                    (run_id, idx, pred, actual),
+                )
 
         self._calculate_default_metrics(run_id, preds, actuals)
 
@@ -212,7 +222,7 @@ class ExperimentTracker:
     def get_predictions(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT prediction, actual, t FROM predictions WHERE run_id = ? ORDER BY t",
+            "SELECT prediction, actual, idx FROM predictions WHERE run_id = ? ORDER BY idx",
             (run_id,),
         )
         results = cursor.fetchall()
@@ -221,9 +231,9 @@ class ExperimentTracker:
 
         preds = [row[0] for row in results]
         actuals = [row[1] for row in results]
-        t = [row[2] for row in results]
+        index = [row[2] for row in results]
 
-        return {"predictions": preds, "actuals": actuals, "t": t}
+        return {"predictions": preds, "actuals": actuals, "index": index}
 
     def log_metric(self, run_id: int, name: str, value: float) -> None:
         self._log_metric(run_id, name, value)
@@ -394,7 +404,7 @@ class ExperimentTracker:
     def _export_predictions_data(self, runs: list, export_dir: str) -> None:
         with open(os.path.join(export_dir, "predictions.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "prediction", "actual", "t"])
+            writer.writerow(["run_id", "prediction", "actual", "idx"])
             for run in runs:
                 try:
                     predictions = self.get_predictions(run["id"])
@@ -404,8 +414,8 @@ class ExperimentTracker:
                                 run["id"],
                                 pred,
                                 predictions["actuals"][i],
-                                predictions["t"][i]
-                                if i < len(predictions["t"])
+                                predictions["index"][i]
+                                if i < len(predictions["index"])
                                 else "",
                             ]
                         )

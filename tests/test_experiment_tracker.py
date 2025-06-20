@@ -108,7 +108,7 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY t",
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY idx",
             (run_id,),
         )
         results = cursor.fetchall()
@@ -141,11 +141,11 @@ class TestExperimentTracker(unittest.TestCase):
 
         self.assertIn("predictions", result)
         self.assertIn("actuals", result)
-        self.assertIn("t", result)
+        self.assertIn("index", result)
 
         self.assertEqual(result["predictions"], test_preds)
         self.assertEqual(result["actuals"], test_actuals)
-        self.assertEqual(len(result["t"]), 3)
+        self.assertEqual(len(result["index"]), 3)
 
     def test_log_predictions_validation(self) -> None:
         exp_id = self.tracker.create_experiment("validation_test")
@@ -208,7 +208,7 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
 
         cursor.execute(
-            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY t",
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY idx",
             (run_id,),
         )
         results = cursor.fetchall()
@@ -557,6 +557,31 @@ class TestExperimentTracker(unittest.TestCase):
     def test_delete_nonexistent_experiment(self) -> None:
         with self.assertRaises(ValueError):
             self.tracker.delete_experiment(9999)
+
+    def test_log_predictions_with_index(self) -> None:
+        exp_id = self.tracker.create_experiment("index_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_preds = [0.1, 0.2, 0.3]
+        test_actuals = [0.15, 0.25, 0.35]
+        test_index = [10, 20, 30]
+
+        self.tracker.log_predictions(run_id, test_preds, test_actuals, index=test_index)
+
+        result = self.tracker.get_predictions(run_id)
+
+        self.assertEqual(result["predictions"], test_preds)
+        self.assertEqual(result["actuals"], test_actuals)
+        self.assertEqual(result["index"], test_index)
+
+    def test_log_predictions_index_length_validation(self) -> None:
+        exp_id = self.tracker.create_experiment("validation_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        with self.assertRaises(ValueError):
+            self.tracker.log_predictions(
+                run_id, [1, 2], [1, 2], index=[1]
+            )  # mismatched index length
 
 
 if __name__ == "__main__":

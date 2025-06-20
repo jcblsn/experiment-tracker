@@ -33,7 +33,10 @@ def main() -> None:
 
     preds = [0.1, 0.2, 0.3]
     actuals = [0.15, 0.25, 0.35]
-    tracker.log_predictions(run_id, preds, actuals, custom_metrics=custom_metrics)
+    indices = [1577836800, 1577923200, 1578009600]
+    tracker.log_predictions(
+        run_id, preds, actuals, index=indices, custom_metrics=custom_metrics
+    )
 
     tracker.add_tag("experiment", exp_id, "project", "demo")
     tracker.add_tag("experiment", exp_id, "version", "1.0")

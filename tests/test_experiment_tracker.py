@@ -134,11 +134,11 @@ class TestExperimentTracker(unittest.TestCase):
 
         self.assertIn("predictions", result)
         self.assertIn("actuals", result)
-        self.assertIn("timestamps", result)
+        self.assertIn("t", result)
 
         self.assertEqual(result["predictions"], test_preds)
         self.assertEqual(result["actuals"], test_actuals)
-        self.assertEqual(len(result["timestamps"]), 3)
+        self.assertEqual(len(result["t"]), 3)
 
     def test_log_predictions_validation(self) -> None:
         exp_id = self.tracker.create_experiment("validation_test")
@@ -517,6 +517,39 @@ class TestExperimentTracker(unittest.TestCase):
         model = models[0]
         self.assertEqual(model["name"], "TestModel")
         self.assertEqual(model["parameters"], params, "Model parameters should match")
+
+    def test_list_experiments(self) -> None:
+        exp1 = self.tracker.create_experiment("Test 1")
+        exp2 = self.tracker.create_experiment("Test 2")
+
+        experiments = self.tracker.list_experiments()
+        self.assertEqual(len(experiments), 2)
+        experiment_ids = {exp["id"] for exp in experiments}
+        self.assertIn(exp1, experiment_ids)
+        self.assertIn(exp2, experiment_ids)
+
+    def test_find_experiments(self) -> None:
+        exp1 = self.tracker.create_experiment("ML Model Test")
+        exp2 = self.tracker.create_experiment("Data Analysis")
+        exp3 = self.tracker.create_experiment("ML Feature Engineering")
+
+        ml_experiments = self.tracker.find_experiments("ML")
+        self.assertEqual(len(ml_experiments), 2)
+        experiment_ids = {exp["id"] for exp in ml_experiments}
+        self.assertIn(exp1, experiment_ids)
+        self.assertIn(exp3, experiment_ids)
+        self.assertNotIn(exp2, experiment_ids)
+
+    def test_delete_experiment(self) -> None:
+        exp_id = self.tracker.create_experiment("To Delete")
+        self.assertIsNotNone(self.tracker.get_experiment(exp_id))
+
+        self.tracker.delete_experiment(exp_id)
+        self.assertIsNone(self.tracker.get_experiment(exp_id))
+
+    def test_delete_nonexistent_experiment(self) -> None:
+        with self.assertRaises(ValueError):
+            self.tracker.delete_experiment(9999)
 
 
 if __name__ == "__main__":

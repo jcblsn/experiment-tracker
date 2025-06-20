@@ -50,7 +50,7 @@ class ExperimentTracker:
             CREATE TABLE IF NOT EXISTS predictions (
                 id INTEGER PRIMARY KEY,
                 run_id INTEGER,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                t TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 prediction REAL,
                 actual REAL,
                 FOREIGN KEY (run_id) REFERENCES runs(id)
@@ -212,7 +212,7 @@ class ExperimentTracker:
     def get_predictions(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT prediction, actual, timestamp FROM predictions WHERE run_id = ? ORDER BY timestamp",
+            "SELECT prediction, actual, t FROM predictions WHERE run_id = ? ORDER BY t",
             (run_id,),
         )
         results = cursor.fetchall()
@@ -221,9 +221,9 @@ class ExperimentTracker:
 
         preds = [row[0] for row in results]
         actuals = [row[1] for row in results]
-        timestamps = [row[2] for row in results]
+        t = [row[2] for row in results]
 
-        return {"predictions": preds, "actuals": actuals, "timestamps": timestamps}
+        return {"predictions": preds, "actuals": actuals, "t": t}
 
     def log_metric(self, run_id: int, name: str, value: float) -> None:
         self._log_metric(run_id, name, value)
@@ -315,12 +315,12 @@ class ExperimentTracker:
         return deleted_count
 
     def export_experiment(self, experiment_id: int, export_dir: str) -> str:
-        if not os.path.exists(export_dir):
-            os.makedirs(export_dir)
-
         experiment = self.get_experiment(experiment_id)
         if experiment is None:
             raise ValueError(f"Experiment ID {experiment_id} does not exist")
+
+        if not os.path.exists(export_dir):
+            os.makedirs(export_dir)
 
         exp_name = experiment["name"].replace(" ", "_")
         exp_export_dir = os.path.join(
@@ -328,9 +328,14 @@ class ExperimentTracker:
         )
         os.makedirs(exp_export_dir, exist_ok=True)
 
-        with open(
-            os.path.join(exp_export_dir, "experiments.csv"), "w", newline=""
-        ) as f:
+        self._export_experiment_data(experiment, exp_export_dir)
+        self._export_runs_data(experiment_id, exp_export_dir)
+        self._export_tags_data(experiment_id, exp_export_dir)
+
+        return exp_export_dir
+
+    def _export_experiment_data(self, experiment: dict, export_dir: str) -> None:
+        with open(os.path.join(export_dir, "experiments.csv"), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["id", "name", "description", "created_at"])
             writer.writerow(
@@ -342,9 +347,10 @@ class ExperimentTracker:
                 ]
             )
 
+    def _export_runs_data(self, experiment_id: int, export_dir: str) -> None:
         runs = self.get_run_history(experiment_id)
 
-        with open(os.path.join(exp_export_dir, "runs.csv"), "w", newline="") as f:
+        with open(os.path.join(export_dir, "runs.csv"), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(
                 ["id", "experiment_id", "status", "start_time", "end_time", "error"]
@@ -361,116 +367,76 @@ class ExperimentTracker:
                     ]
                 )
 
-        with open(os.path.join(exp_export_dir, "models.csv"), "w", newline="") as f:
+        self._export_models_data(runs, export_dir)
+        self._export_predictions_data(runs, export_dir)
+        self._export_metrics_data(runs, export_dir)
+
+    def _export_models_data(self, runs: list, export_dir: str) -> None:
+        with open(os.path.join(export_dir, "models.csv"), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["id", "run_id", "name", "parameters", "created_at"])
-
-        with open(
-            os.path.join(exp_export_dir, "predictions.csv"), "w", newline=""
-        ) as f:
-            writer = csv.writer(f)
-            writer.writerow(["run_id", "prediction", "actual", "timestamp"])
-
-        with open(os.path.join(exp_export_dir, "metrics.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["run_id", "name", "value"])
-
-        with open(os.path.join(exp_export_dir, "tags.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["id", "entity_type", "entity_id", "name", "value"])
-
-        for run in runs:
-            run_id = run["id"]
-
-            try:
-                models = self.get_models(run_id)
-                with open(
-                    os.path.join(exp_export_dir, "models.csv"), "a", newline=""
-                ) as f:
-                    writer = csv.writer(f)
+            for run in runs:
+                try:
+                    models = self.get_models(run["id"])
                     for model in models:
                         writer.writerow(
                             [
                                 model["id"],
-                                run_id,
+                                run["id"],
                                 model["name"],
                                 json.dumps(model["parameters"]),
                                 model["created_at"],
                             ]
                         )
-            except Exception:
-                pass
+                except ValueError:
+                    continue
 
-            try:
-                predictions = self.get_predictions(run_id)
-                with open(
-                    os.path.join(exp_export_dir, "predictions.csv"), "a", newline=""
-                ) as f:
-                    writer = csv.writer(f)
-                    for i in range(len(predictions["predictions"])):
+    def _export_predictions_data(self, runs: list, export_dir: str) -> None:
+        with open(os.path.join(export_dir, "predictions.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "prediction", "actual", "t"])
+            for run in runs:
+                try:
+                    predictions = self.get_predictions(run["id"])
+                    for i, pred in enumerate(predictions["predictions"]):
                         writer.writerow(
                             [
-                                run_id,
-                                predictions["predictions"][i],
+                                run["id"],
+                                pred,
                                 predictions["actuals"][i],
-                                predictions["timestamps"][i]
-                                if i < len(predictions["timestamps"])
+                                predictions["t"][i]
+                                if i < len(predictions["t"])
                                 else "",
                             ]
                         )
-            except Exception:
-                pass
+                except ValueError:
+                    continue
 
-            try:
-                metrics = self.get_metrics(run_id)
-                with open(
-                    os.path.join(exp_export_dir, "metrics.csv"), "a", newline=""
-                ) as f:
-                    writer = csv.writer(f)
-                    for name, value in metrics.items():
-                        writer.writerow([run_id, name, value])
-            except Exception:
-                pass
-
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "SELECT id, entity_type, entity_id, name, value FROM tags WHERE entity_type = 'experiment' AND entity_id = ?",
-                (experiment_id,),
-            )
-            experiment_tags = cursor.fetchall()
-
-            if experiment_tags:
-                with open(
-                    os.path.join(exp_export_dir, "tags.csv"), "a", newline=""
-                ) as f:
-                    writer = csv.writer(f)
-                    for tag in experiment_tags:
-                        writer.writerow(tag)
-        except Exception:
-            pass
-
-        try:
+    def _export_metrics_data(self, runs: list, export_dir: str) -> None:
+        with open(os.path.join(export_dir, "metrics.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["run_id", "name", "value"])
             for run in runs:
-                run_id = run["id"]
-                cursor = self.conn.cursor()
-                cursor.execute(
-                    "SELECT id, entity_type, entity_id, name, value FROM tags WHERE entity_type = 'run' AND entity_id = ?",
-                    (run_id,),
-                )
-                run_tags = cursor.fetchall()
+                try:
+                    metrics = self.get_metrics(run["id"])
+                    for name, value in metrics.items():
+                        writer.writerow([run["id"], name, value])
+                except ValueError:
+                    continue
 
-                if run_tags:
-                    with open(
-                        os.path.join(exp_export_dir, "tags.csv"), "a", newline=""
-                    ) as f:
-                        writer = csv.writer(f)
-                        for tag in run_tags:
-                            writer.writerow(tag)
-        except Exception:
-            pass
+    def _export_tags_data(self, experiment_id: int, export_dir: str) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, entity_type, entity_id, name, value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT id FROM runs WHERE experiment_id = ?))",
+            (experiment_id, experiment_id),
+        )
+        tags = cursor.fetchall()
 
-        return exp_export_dir
+        with open(os.path.join(export_dir, "tags.csv"), "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["id", "entity_type", "entity_id", "name", "value"])
+            for tag in tags:
+                writer.writerow(tag)
 
     def import_experiment(self, import_dir: str) -> int:
         if not os.path.exists(import_dir):
@@ -584,3 +550,32 @@ class ExperimentTracker:
                     self.add_tag(entity_type, new_entity_id, tag_name, tag_value)
 
         return experiment_id
+
+    def list_experiments(self, limit: int = 10) -> list[dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, name, description, created_at FROM experiments ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        )
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def find_experiments(self, name_pattern: str) -> list[dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT id, name, description, created_at FROM experiments WHERE name LIKE ? ORDER BY created_at DESC",
+            (f"%{name_pattern}%",),
+        )
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def delete_experiment(self, experiment_id: int) -> None:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM experiments WHERE id = ?", (experiment_id,))
+        if cursor.fetchone() is None:
+            raise ValueError(f"Experiment ID {experiment_id} does not exist")
+
+        cursor.execute("DELETE FROM experiments WHERE id = ?", (experiment_id,))
+        self.conn.commit()

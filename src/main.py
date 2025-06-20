@@ -46,6 +46,18 @@ def main() -> None:
     print(f"Experiment tags: {exp_tags}")
     print(f"Run tags: {run_tags}")
 
+    print("\nListing recent experiments:")
+    experiments = tracker.list_experiments(limit=5)
+    for exp in experiments:
+        print(f"  {exp['id']}: {exp['name']} ({exp['created_at']})")
+
+    print("\nSearching for experiments containing 'Main':")
+    found_experiments = tracker.find_experiments("Main")
+    for exp in found_experiments[:10]:
+        print(f"  {exp['id']}: {exp['name']}")
+    if len(found_experiments) > 10:
+        print(f"  ... and {len(found_experiments) - 10} others\n")
+
     tracker.end_run(run_id)
 
     run_id2 = tracker.start_run(exp_id)

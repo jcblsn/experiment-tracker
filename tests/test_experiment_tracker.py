@@ -19,11 +19,18 @@ class TestExperimentTracker(unittest.TestCase):
             self.tracker.conn.close()
 
     def test_table_creation(self) -> None:
-        required_tables = {"experiments", "runs", "models", "predictions"}
+        required_tables = {
+            "experiments",
+            "runs",
+            "models",
+            "predictions",
+            "metrics",
+            "tags",
+        }
         cursor = self.tracker.conn.cursor()
         cursor.execute("""
             SELECT name FROM sqlite_master
-            WHERE type='table' AND name IN ('experiments', 'runs', 'models', 'predictions')
+            WHERE type='table' AND name IN ('experiments', 'runs', 'models', 'predictions', 'metrics', 'tags')
         """)
         created_tables = {row[0] for row in cursor.fetchall()}
         self.assertEqual(
@@ -101,7 +108,7 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id",
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY t",
             (run_id,),
         )
         results = cursor.fetchall()
@@ -201,7 +208,7 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(json.loads(cursor.fetchone()[0]), test_params)
 
         cursor.execute(
-            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY id",
+            "SELECT prediction, actual FROM predictions WHERE run_id=? ORDER BY t",
             (run_id,),
         )
         results = cursor.fetchall()

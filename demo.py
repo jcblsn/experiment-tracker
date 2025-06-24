@@ -3,7 +3,7 @@ import os
 import shutil
 import tempfile
 
-from src.experiment_tracker import ExperimentTracker
+from src.experiment_tracker.experiment_tracker import ExperimentTracker
 
 
 def main() -> None:

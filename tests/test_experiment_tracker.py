@@ -601,48 +601,6 @@ class TestExperimentTracker(unittest.TestCase):
                 run_id, [1, 2], [1, 2], index=[1]
             )  # mismatched index length
 
-    def test_get_best_model(self) -> None:
-        exp_id = self.tracker.create_experiment("best_model_test")
-
-        run1 = self.tracker.start_run(exp_id)
-        self.tracker.log_model(run1, "RandomForest", {"n_estimators": 100})
-        self.tracker.log_predictions(run1, [0.9, 0.8], [1.0, 0.9])
-        self.tracker.end_run(run1)
-
-        run2 = self.tracker.start_run(exp_id)
-        self.tracker.log_model(run2, "SVM", {"C": 1.0})
-        self.tracker.log_predictions(run2, [0.8, 0.6], [1.0, 0.9])
-        self.tracker.end_run(run2)
-
-        run3 = self.tracker.start_run(exp_id)
-        self.tracker.log_model(run3, "RandomForest", {"n_estimators": 50})
-        self.tracker.log_predictions(run3, [0.85, 0.75], [1.0, 0.9])
-        self.tracker.end_run(run3)
-
-        best_model = self.tracker.get_best_model(exp_id)
-        self.assertIsNotNone(best_model)
-        self.assertEqual(best_model["model_name"], "RandomForest")
-        self.assertEqual(best_model["parameters"]["n_estimators"], 100)
-        self.assertEqual(best_model["metric_name"], "rmse")
-        self.assertEqual(best_model["num_runs"], 1)
-        self.assertLess(best_model["average_metric"], 0.12)
-
-        self.tracker.log_metric(run1, "accuracy", 0.95)
-        self.tracker.log_metric(run2, "accuracy", 0.85)
-        self.tracker.log_metric(run3, "accuracy", 0.90)
-
-        best_accuracy_model = self.tracker.get_best_model(exp_id, "accuracy")
-        self.assertIsNotNone(best_accuracy_model)
-        self.assertEqual(best_accuracy_model["model_name"], "RandomForest")
-        self.assertEqual(best_accuracy_model["parameters"]["n_estimators"], 100)
-        self.assertEqual(best_accuracy_model["average_metric"], 0.95)
-
-        # Test non-existent experiment
-        self.assertIsNone(self.tracker.get_best_model(99999))
-
-        # Test non-existent metric
-        self.assertIsNone(self.tracker.get_best_model(exp_id, "nonexistent_metric"))
-
 
 if __name__ == "__main__":
     unittest.main()

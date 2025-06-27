@@ -52,14 +52,16 @@ def main() -> None:
     print("\nListing recent experiments:")
     experiments = tracker.list_experiments(limit=5)
     for exp in experiments:
-        print(f"  {exp['id']}: {exp['name']} ({exp['created_at']})")
+        print(
+            f" {exp['experiment_id']}: {exp['experiment_name']} ({exp['created_time']})"
+        )
 
     print("\nSearching for experiments containing 'Main':")
     found_experiments = tracker.find_experiments("Main")
     for exp in found_experiments[:10]:
-        print(f"  {exp['id']}: {exp['name']}")
+        print(f" {exp['experiment_id']}: {exp['experiment_name']}")
     if len(found_experiments) > 10:
-        print(f"  ... and {len(found_experiments) - 10} others\n")
+        print(f" ... and {len(found_experiments) - 10} others\n")
 
     tracker.end_run(run_id)
 
@@ -71,12 +73,12 @@ def main() -> None:
     actuals2 = [0.15, 0.25, 0.35]
     tracker.log_predictions(run_id2, preds2, actuals2)
     tracker.end_run(run_id2)
-    print("Completed two experiment runs")
+    print("\nCompleted two experiment runs")
 
     export_dir = tempfile.mkdtemp()
     try:
         exp_export_dir = tracker.export_experiment(exp_id, export_dir)
-        print(f"Exported experiment to: {exp_export_dir}")
+        print(f"\nExported experiment to: {exp_export_dir}")
 
         new_db_path = "imported_experiments.db"
         if os.path.exists(new_db_path):
@@ -84,12 +86,12 @@ def main() -> None:
 
         new_tracker = ExperimentTracker(new_db_path)
         new_exp_id = new_tracker.import_experiment(exp_export_dir)
-        print(f"Imported experiment with ID: {new_exp_id}")
+        print(f"\nImported experiment with ID: {new_exp_id}")
 
         metrics = new_tracker.get_metrics(
-            new_tracker.get_run_history(new_exp_id)[0]["id"]
+            new_tracker.get_run_history(new_exp_id)[0]["run_id"]
         )
-        print(f"Metrics from imported run: {metrics}")
+        print(f"\nMetrics from imported run: {metrics}")
 
         new_tracker.conn.close()
         tracker.conn.close()

@@ -602,34 +602,29 @@ class TestExperimentTracker(unittest.TestCase):
     def test_get_best_model(self) -> None:
         exp_id = self.tracker.create_experiment("best_model_test")
 
-        # Run 1: Random Forest with RMSE 0.1
         run1 = self.tracker.start_run(exp_id)
         self.tracker.log_model(run1, "RandomForest", {"n_estimators": 100})
-        self.tracker.log_predictions(run1, [0.9, 0.8], [1.0, 0.9])  # RMSE ≈ 0.1
+        self.tracker.log_predictions(run1, [0.9, 0.8], [1.0, 0.9])
         self.tracker.end_run(run1)
 
-        # Run 2: SVM with RMSE 0.2
         run2 = self.tracker.start_run(exp_id)
         self.tracker.log_model(run2, "SVM", {"C": 1.0})
-        self.tracker.log_predictions(run2, [0.8, 0.6], [1.0, 0.9])  # RMSE ≈ 0.2
+        self.tracker.log_predictions(run2, [0.8, 0.6], [1.0, 0.9])
         self.tracker.end_run(run2)
 
-        # Run 3: Another Random Forest with different params but worse RMSE 0.15
         run3 = self.tracker.start_run(exp_id)
         self.tracker.log_model(run3, "RandomForest", {"n_estimators": 50})
-        self.tracker.log_predictions(run3, [0.85, 0.75], [1.0, 0.9])  # RMSE ≈ 0.15
+        self.tracker.log_predictions(run3, [0.85, 0.75], [1.0, 0.9])
         self.tracker.end_run(run3)
 
-        # Test default RMSE metric (lower is better)
         best_model = self.tracker.get_best_model(exp_id)
         self.assertIsNotNone(best_model)
         self.assertEqual(best_model["model_name"], "RandomForest")
         self.assertEqual(best_model["parameters"]["n_estimators"], 100)
         self.assertEqual(best_model["metric_name"], "rmse")
         self.assertEqual(best_model["num_runs"], 1)
-        self.assertLess(best_model["average_metric"], 0.12)  # Should be around 0.1
+        self.assertLess(best_model["average_metric"], 0.12)
 
-        # Test with accuracy metric (higher is better)
         self.tracker.log_metric(run1, "accuracy", 0.95)
         self.tracker.log_metric(run2, "accuracy", 0.85)
         self.tracker.log_metric(run3, "accuracy", 0.90)

@@ -23,28 +23,28 @@ For more about `uv` see [here](https://docs.astral.sh/uv/).
 
 ## Usage
 
+The following pseudocode illustrates some simple use cases.
+
 ```python
 from experiment_tracker import ExperimentTracker
 
 tracker = ExperimentTracker("experiments.db")
 
-# Create experiment, run
+
+# Create experiment, model
 exp_id = tracker.create_experiment("Model Comparison", "Testing different algorithms")
 
-run_id = tracker.start_run(exp_id)
+tracker.log_model(run_id, "OLS", params={"intercept": True, "transform_response": "log"})
 
 # Log results
-tracker.log_model(run_id, "OLS", params={"intercept": True, "transform_response": "log"})
+run_id = tracker.start_run(exp_id)
 tracker.log_predictions(run_id, preds=[0.8, 0.9, 0.7], actuals=[0.85, 0.88, 0.72])
 tracker.log_metric(run_id, "SSE", 0.0033)
-
-# Add tags
 tracker.add_tag("run", run_id, tag_name="dataset", tag_value="train")
-
 tracker.end_run(run_id)
 
-# Find best performing model
-best_model = tracker.get_best_model(exp_id, "rmse")
+# Retrieve
+tracker.get_run_history(exp_id)
 ```
 
 ## Schema

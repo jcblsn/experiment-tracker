@@ -121,18 +121,6 @@ def main() -> None:
         )
         print(f"\nMetrics from imported run: {metrics}")
 
-        print("\nFinding best model across all runs:")
-        preferred_metric = "rmse"
-        best_model = tracker.get_best_model(exp_id, metric=preferred_metric)
-        if best_model:
-            print(f" Best model by {preferred_metric}: {best_model['model_name']}")
-            print(f" Parameters: {best_model['parameters']}")
-            print(
-                f" Average {best_model['metric_name']}: {best_model['average_metric']}"
-            )
-            print(f" Based on {best_model['num_runs']} runs")
-            print(f" Run IDs: {best_model['run_ids']}")
-
         new_tracker.conn.close()
         tracker.conn.close()
     finally:

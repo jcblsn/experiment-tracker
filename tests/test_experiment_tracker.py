@@ -240,7 +240,9 @@ class TestExperimentTracker(unittest.TestCase):
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
         self.tracker.log_predictions(run_id, preds, actuals)
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT metric, value FROM metrics WHERE run_id=?", (run_id,))
+        cursor.execute(
+            "SELECT metric, metric_value FROM metrics WHERE run_id=?", (run_id,)
+        )
         rows = cursor.fetchall()
         self.assertEqual(len(rows), 2, "Should insert two metrics entries")
         metrics = {name: value for name, value in rows}

@@ -81,7 +81,7 @@ class ExperimentTracker:
             CREATE TABLE IF NOT EXISTS metrics (
                 run_id INTEGER,
                 metric TEXT NOT NULL,
-                value REAL NOT NULL,
+                metric_value REAL NOT NULL,
                 UNIQUE(run_id, metric),
                 FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
@@ -92,8 +92,8 @@ class ExperimentTracker:
                 tag_id INTEGER PRIMARY KEY,
                 entity_type TEXT CHECK(entity_type IN ('experiment', 'run')),
                 entity_id INTEGER,
-                name TEXT NOT NULL,
-                value TEXT
+                tag TEXT NOT NULL,
+                tag_value TEXT
             )
         """)
 
@@ -130,9 +130,9 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         rounded_value = smart_round(value)
         cursor.execute(
-            """INSERT INTO metrics (run_id, metric, value)
+            """INSERT INTO metrics (run_id, metric, metric_value)
                VALUES (?, ?, ?)
-               ON CONFLICT(run_id, metric) DO UPDATE SET value = ?""",
+               ON CONFLICT(run_id, metric) DO UPDATE SET metric_value = ?""",
             (run_id, name, rounded_value, rounded_value),
         )
 
@@ -262,7 +262,9 @@ class ExperimentTracker:
 
     def get_metrics(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT metric, value FROM metrics WHERE run_id = ?", (run_id,))
+        cursor.execute(
+            "SELECT metric, metric_value FROM metrics WHERE run_id = ?", (run_id,)
+        )
         rows = cursor.fetchall()
         if not rows:
             raise ValueError(f"No metrics found for run id {run_id}")
@@ -289,7 +291,7 @@ class ExperimentTracker:
             )
 
         cursor.execute(
-            "INSERT INTO tags (entity_type, entity_id, name, value) VALUES (?, ?, ?, ?)",
+            "INSERT INTO tags (entity_type, entity_id, tag, tag_value) VALUES (?, ?, ?, ?)",
             (entity_type, entity_id, tag_name, tag_value),
         )
         self.conn.commit()
@@ -301,7 +303,7 @@ class ExperimentTracker:
 
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT name, value FROM tags WHERE entity_type = ? AND entity_id = ?",
+            "SELECT tag, tag_value FROM tags WHERE entity_type = ? AND entity_id = ?",
             (entity_type, entity_id),
         )
         return {name: value for name, value in cursor.fetchall()}
@@ -315,12 +317,12 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         if tag_value is None:
             cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND name = ?",
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag = ?",
                 (entity_type, tag_name),
             )
         else:
             cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND name = ? AND value = ?",
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag = ? AND tag_value = ?",
                 (entity_type, tag_name, tag_value),
             )
 
@@ -335,12 +337,12 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         if tag_value is None:
             cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ?",
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag = ?",
                 (entity_type, entity_id, tag_name),
             )
         else:
             cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ? AND value = ?",
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag = ? AND tag_value = ?",
                 (entity_type, entity_id, tag_name, tag_value),
             )
 
@@ -462,7 +464,7 @@ class ExperimentTracker:
     def _export_metrics_data(self, runs: list, export_dir: str) -> None:
         with open(os.path.join(export_dir, "metrics.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "metric", "value"])
+            writer.writerow(["run_id", "metric", "metric_value"])
             for run in runs:
                 try:
                     metrics = self.get_metrics(run["run_id"])
@@ -474,14 +476,14 @@ class ExperimentTracker:
     def _export_tags_data(self, experiment_id: int, export_dir: str) -> None:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT tag_id, entity_type, entity_id, name, value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT run_id FROM runs WHERE experiment_id = ?))",
+            "SELECT tag_id, entity_type, entity_id, tag, tag_value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT run_id FROM runs WHERE experiment_id = ?))",
             (experiment_id, experiment_id),
         )
         tags = cursor.fetchall()
 
         with open(os.path.join(export_dir, "tags.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["tag_id", "entity_type", "entity_id", "name", "value"])
+            writer.writerow(["tag_id", "entity_type", "entity_id", "tag", "tag_value"])
             for tag in tags:
                 writer.writerow(tag)
 

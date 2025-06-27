@@ -226,20 +226,19 @@ class ExperimentTracker:
         columns = [col[0] for col in cursor.description]
         return [dict(zip(columns, row)) for row in rows]
 
-    def get_models(self, run_id: int) -> list[dict]:
+    def get_model(self, run_id: int) -> dict | None:
         cursor = self.conn.cursor()
         cursor.execute(
             "SELECT model_id, run_id, model_name, parameters FROM models WHERE run_id = ?",
             (run_id,),
         )
-        rows = cursor.fetchall()
+        row = cursor.fetchone()
+        if row is None:
+            return None
         columns = [col[0] for col in cursor.description]
-        models = []
-        for row in rows:
-            entry = dict(zip(columns, row))
-            entry["parameters"] = json.loads(entry["parameters"])
-            models.append(entry)
-        return models
+        model = dict(zip(columns, row))
+        model["parameters"] = json.loads(model["parameters"])
+        return model
 
     def get_predictions(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
@@ -426,8 +425,8 @@ class ExperimentTracker:
             writer.writerow(["model_id", "run_id", "model_name", "parameters"])
             for run in runs:
                 try:
-                    models = self.get_models(run["run_id"])
-                    for model in models:
+                    model = self.get_model(run["run_id"])
+                    if model:
                         writer.writerow(
                             [
                                 model["model_id"],
@@ -632,3 +631,64 @@ class ExperimentTracker:
             "DELETE FROM experiments WHERE experiment_id = ?", (experiment_id,)
         )
         self.conn.commit()
+
+    def get_best_model(self, experiment_id: int, metric: str = "rmse") -> dict | None:
+        runs = self.get_run_history(experiment_id)
+        if not runs:
+            return None
+
+        model_metrics = {}
+
+        for run in runs:
+            run_id = run["run_id"]
+
+            try:
+                model = self.get_model(run_id)
+                metrics = self.get_metrics(run_id)
+
+                if not model or metric not in metrics:
+                    continue
+                model_key = (
+                    model["model_name"],
+                    str(sorted(model["parameters"].items())),
+                )
+
+                if model_key not in model_metrics:
+                    model_metrics[model_key] = {
+                        "model_name": model["model_name"],
+                        "parameters": model["parameters"],
+                        "metric_values": [],
+                        "run_ids": [],
+                    }
+
+                model_metrics[model_key]["metric_values"].append(metrics[metric])
+                model_metrics[model_key]["run_ids"].append(run_id)
+
+            except ValueError:
+                continue
+
+        if not model_metrics:
+            return None
+
+        best_model = None
+        best_avg_metric = float("inf") if metric in ["rmse", "mae"] else float("-inf")
+
+        for model_key, data in model_metrics.items():
+            avg_metric = sum(data["metric_values"]) / len(data["metric_values"])
+
+            is_better = (
+                metric in ["rmse", "mae"] and avg_metric < best_avg_metric
+            ) or (metric not in ["rmse", "mae"] and avg_metric > best_avg_metric)
+
+            if is_better:
+                best_avg_metric = avg_metric
+                best_model = {
+                    "model_name": data["model_name"],
+                    "parameters": data["parameters"],
+                    "average_metric": smart_round(avg_metric),
+                    "metric_name": metric,
+                    "num_runs": len(data["metric_values"]),
+                    "run_ids": data["run_ids"],
+                }
+
+        return best_model

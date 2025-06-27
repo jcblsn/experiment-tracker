@@ -411,10 +411,10 @@ class TestExperimentTracker(unittest.TestCase):
             self.assertEqual(len(runs), 1)
 
             new_run_id = runs[0]["run_id"]
-            models = target_tracker.get_models(new_run_id)
-            self.assertEqual(len(models), 1)
-            self.assertEqual(models[0]["model_name"], "ImportModel")
-            self.assertEqual(models[0]["parameters"]["learning_rate"], 0.01)
+            model = target_tracker.get_model(new_run_id)
+            self.assertIsNotNone(model)
+            self.assertEqual(model["model_name"], "ImportModel")
+            self.assertEqual(model["parameters"]["learning_rate"], 0.01)
 
             predictions = target_tracker.get_predictions(new_run_id)
             self.assertEqual(predictions["predictions"], preds)
@@ -531,14 +531,13 @@ class TestExperimentTracker(unittest.TestCase):
             "Runs should be ordered by start_time descending",
         )
 
-    def test_get_models(self):
-        exp_id = self.tracker.create_experiment("get_models_test")
+    def test_get_model(self):
+        exp_id = self.tracker.create_experiment("get_model_test")
         run_id = self.tracker.start_run(exp_id)
         params = {"alpha": 0.5, "l1_ratio": 0.7}
         self.tracker.log_model(run_id, "TestModel", params)
-        models = self.tracker.get_models(run_id)
-        self.assertEqual(len(models), 1, "Should retrieve one model")
-        model = models[0]
+        model = self.tracker.get_model(run_id)
+        self.assertIsNotNone(model, "Should retrieve one model")
         self.assertEqual(model["model_name"], "TestModel")
         self.assertEqual(model["parameters"], params, "Model parameters should match")
 
@@ -599,6 +598,53 @@ class TestExperimentTracker(unittest.TestCase):
             self.tracker.log_predictions(
                 run_id, [1, 2], [1, 2], index=[1]
             )  # mismatched index length
+
+    def test_get_best_model(self) -> None:
+        exp_id = self.tracker.create_experiment("best_model_test")
+
+        # Run 1: Random Forest with RMSE 0.1
+        run1 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run1, "RandomForest", {"n_estimators": 100})
+        self.tracker.log_predictions(run1, [0.9, 0.8], [1.0, 0.9])  # RMSE ≈ 0.1
+        self.tracker.end_run(run1)
+
+        # Run 2: SVM with RMSE 0.2
+        run2 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run2, "SVM", {"C": 1.0})
+        self.tracker.log_predictions(run2, [0.8, 0.6], [1.0, 0.9])  # RMSE ≈ 0.2
+        self.tracker.end_run(run2)
+
+        # Run 3: Another Random Forest with different params but worse RMSE 0.15
+        run3 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run3, "RandomForest", {"n_estimators": 50})
+        self.tracker.log_predictions(run3, [0.85, 0.75], [1.0, 0.9])  # RMSE ≈ 0.15
+        self.tracker.end_run(run3)
+
+        # Test default RMSE metric (lower is better)
+        best_model = self.tracker.get_best_model(exp_id)
+        self.assertIsNotNone(best_model)
+        self.assertEqual(best_model["model_name"], "RandomForest")
+        self.assertEqual(best_model["parameters"]["n_estimators"], 100)
+        self.assertEqual(best_model["metric_name"], "rmse")
+        self.assertEqual(best_model["num_runs"], 1)
+        self.assertLess(best_model["average_metric"], 0.12)  # Should be around 0.1
+
+        # Test with accuracy metric (higher is better)
+        self.tracker.log_metric(run1, "accuracy", 0.95)
+        self.tracker.log_metric(run2, "accuracy", 0.85)
+        self.tracker.log_metric(run3, "accuracy", 0.90)
+
+        best_accuracy_model = self.tracker.get_best_model(exp_id, "accuracy")
+        self.assertIsNotNone(best_accuracy_model)
+        self.assertEqual(best_accuracy_model["model_name"], "RandomForest")
+        self.assertEqual(best_accuracy_model["parameters"]["n_estimators"], 100)
+        self.assertEqual(best_accuracy_model["average_metric"], 0.95)
+
+        # Test non-existent experiment
+        self.assertIsNone(self.tracker.get_best_model(99999))
+
+        # Test non-existent metric
+        self.assertIsNone(self.tracker.get_best_model(exp_id, "nonexistent_metric"))
 
 
 if __name__ == "__main__":

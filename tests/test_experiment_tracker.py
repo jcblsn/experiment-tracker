@@ -65,7 +65,8 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT experiment_id, run_status, run_start_time FROM runs WHERE run_id=?", (run_id,)
+            "SELECT experiment_id, run_status, run_start_time FROM runs WHERE run_id=?",
+            (run_id,),
         )
         result = cursor.fetchone()
 
@@ -87,7 +88,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.log_model(run_id, "test_model", test_params)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT model_name, parameters FROM models WHERE run_id=?", (run_id,))
+        cursor.execute(
+            "SELECT model_name, parameters FROM models WHERE run_id=?", (run_id,)
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Model record should exist")
@@ -163,7 +166,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.end_run(run_id)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT run_status, run_end_time, error FROM runs WHERE run_id=?", (run_id,))
+        cursor.execute(
+            "SELECT run_status, run_end_time, error FROM runs WHERE run_id=?", (run_id,)
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Run record should exist")
@@ -178,7 +183,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.end_run(run_id, success=False, error=error_msg)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT run_status, run_end_time, error FROM runs WHERE run_id=?", (run_id,))
+        cursor.execute(
+            "SELECT run_status, run_end_time, error FROM runs WHERE run_id=?", (run_id,)
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Run record should exist")
@@ -198,7 +205,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.end_run(run_id)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT experiment_name FROM experiments WHERE experiment_id=?", (exp_id,))
+        cursor.execute(
+            "SELECT experiment_name FROM experiments WHERE experiment_id=?", (exp_id,)
+        )
         self.assertEqual(cursor.fetchone()[0], "Integration Test")
 
         cursor.execute("SELECT run_status FROM runs WHERE run_id=?", (run_id,))
@@ -322,7 +331,15 @@ class TestExperimentTracker(unittest.TestCase):
             with open(os.path.join(export_path, "experiments.csv"), "r") as f:
                 reader = csv.reader(f)
                 headers = next(reader)
-                self.assertEqual(headers, ["experiment_id", "experiment_name", "experiment_description", "created_time"])
+                self.assertEqual(
+                    headers,
+                    [
+                        "experiment_id",
+                        "experiment_name",
+                        "experiment_description",
+                        "created_time",
+                    ],
+                )
 
             with open(os.path.join(export_path, "runs.csv"), "r") as f:
                 reader = csv.reader(f)

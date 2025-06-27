@@ -1,7 +1,7 @@
 [project]
 name = "experiment-tracker"
 version = "1.0.0"
-description = "Add your description here"
+description = "Lightweight experiment tracking"
 readme = "README.md"
 authors = [
     { name = "Jacob Eliason", email = "jacobeliason@gmail.com" }

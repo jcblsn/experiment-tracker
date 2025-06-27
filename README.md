@@ -9,28 +9,56 @@ A very lightweight alternative to MLFlow's experiment tracking capabilities.
 
 Last year, I was using MLFlow for a complex modeling project at work and was surprised to find it slow to a halt after only a few hundred runs. This repo was inspired by my subsequent research about alternatives, especially Eduardo Blancas' [Who needs MLflow when you have SQLite?](https://ploomber.io/blog/experiment-tracking/).
 
-The system uses a SQLite backend for direct SQL queries, operates locally without a server, and has no dependencies outside the standard library--making it preferable for many solo projects where simplicity and control are a priority.
+The system uses a SQLite backend for direct SQL queries, operates locally without a server, and has no dependencies outside the standard library. This makes it desirable for solo projects where simplicity and speed are desired.
 
 ## Installation
 
 Requires Python 3.12 or later.
 
+```bash
+uv pip install "git+https://github.com/jcblsn/experiment-tracker"
+```
+
+For more about `uv` see [here](https://docs.astral.sh/uv/).
+
 ## Usage
 
-The main interface is exposed through the `ExperimentTracker` class. A typical workflow follows:
+The following pseudocode illustrates some simple use cases.
 
-1. Create an experiment
-2. Start a run under that experiment
-3. Log model details and parameters
-4. Log predictions, which will automatically compute metrics
-5. End the run
+```python
+from experiment_tracker import ExperimentTracker
 
-Examples are provided in `src.main.py`.
+tracker = ExperimentTracker("experiments.db")
+
+
+# Create experiment, model
+exp_id = tracker.create_experiment("Model Comparison", "Testing different algorithms")
+
+tracker.log_model(run_id, "OLS", params={"intercept": True, "transform_response": "log"})
+
+# Log results
+run_id = tracker.start_run(exp_id)
+tracker.log_predictions(run_id, preds=[0.8, 0.9, 0.7], actuals=[0.85, 0.88, 0.72])
+tracker.log_metric(run_id, "SSE", 0.0033)
+tracker.add_tag("run", run_id, tag_name="dataset", tag_value="train")
+tracker.end_run(run_id)
+
+# Retrieve
+tracker.get_run_history(exp_id)
+```
 
 ## Schema
 
-The database contains tables for experiments, runs, models, predictions, and metrics.
+- experiments: experiment_id, experiment_name, experiment_description, created_time
+- runs: run_id, experiment_id, run_status, run_start_time, run_end_time, error
+- models: model_id, run_id, model_name, parameters
+- predictions: prediction_id, run_id, idx, prediction, actual
+- metrics: run_id, metric, metric_value
+- tags: tag_id, entity_type, entity_id, tag, tag_value
 
 ## Testing
 
-Use `python -m unittest discover tests` to run the test suite.
+ ```bash
+  # Run all tests
+  python -m unittest discover tests
+```

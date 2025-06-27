@@ -3,6 +3,28 @@ import json
 import math
 import os
 import sqlite3
+from typing import Union
+
+
+def smart_round(
+    value: Union[int, float],
+    precision: int = 6,
+    *,
+    keep_exact_integers: bool = True,
+) -> Union[int, float]:
+    if value == 0:
+        return 0
+
+    if keep_exact_integers and float(value).is_integer():
+        return int(value)
+
+    abs_val = abs(value)
+
+    if abs_val >= 1:
+        return round(value, precision)
+
+    digits = precision - 1 - int(math.floor(math.log10(abs_val)))
+    return round(value, digits)
 
 
 class ExperimentTracker:
@@ -16,63 +38,62 @@ class ExperimentTracker:
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS experiments (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                experiment_id INTEGER PRIMARY KEY,
+                experiment_name TEXT NOT NULL,
+                experiment_description TEXT,
+                created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS runs (
-                id INTEGER PRIMARY KEY,
+                run_id INTEGER PRIMARY KEY,
                 experiment_id INTEGER,
-                status TEXT CHECK(status IN ('RUNNING', 'COMPLETED', 'FAILED')),
-                start_time TIMESTAMP,
-                end_time TIMESTAMP,
+                run_status TEXT CHECK(run_status IN ('RUNNING', 'COMPLETED', 'FAILED')),
+                run_start_time TIMESTAMP,
+                run_end_time TIMESTAMP,
                 error TEXT,
-                FOREIGN KEY (experiment_id) REFERENCES experiments(id)
+                FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS models (
-                id INTEGER PRIMARY KEY,
+                model_id INTEGER PRIMARY KEY,
                 run_id INTEGER,
-                name TEXT NOT NULL,
+                model_name TEXT NOT NULL,
                 parameters TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (run_id) REFERENCES runs(id)
+                FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS predictions (
-                id INTEGER PRIMARY KEY,
+                prediction_id INTEGER PRIMARY KEY,
                 run_id INTEGER,
                 idx INTEGER,
                 prediction REAL,
                 actual REAL,
-                FOREIGN KEY (run_id) REFERENCES runs(id)
+                FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
         """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS metrics (
                 run_id INTEGER,
-                name TEXT NOT NULL,
-                value REAL NOT NULL,
-                UNIQUE(run_id, name),
-                FOREIGN KEY (run_id) REFERENCES runs(id)
+                metric TEXT NOT NULL,
+                metric_value REAL NOT NULL,
+                UNIQUE(run_id, metric),
+                FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
         """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tags (
-                id INTEGER PRIMARY KEY,
+                tag_id INTEGER PRIMARY KEY,
                 entity_type TEXT CHECK(entity_type IN ('experiment', 'run')),
                 entity_id INTEGER,
-                name TEXT NOT NULL,
-                value TEXT
+                tag TEXT NOT NULL,
+                tag_value TEXT
             )
         """)
 
@@ -81,7 +102,7 @@ class ExperimentTracker:
     def create_experiment(self, name: str, description: str | None = None) -> int:
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO experiments (name, description) VALUES (?, ?)",
+            "INSERT INTO experiments (experiment_name, experiment_description) VALUES (?, ?)",
             (name, description),
         )
         self.conn.commit()
@@ -90,7 +111,7 @@ class ExperimentTracker:
     def start_run(self, experiment_id: int) -> int:
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO runs (experiment_id, status, start_time) VALUES (?, 'RUNNING', CURRENT_TIMESTAMP)",
+            "INSERT INTO runs (experiment_id, run_status, run_start_time) VALUES (?, 'RUNNING', CURRENT_TIMESTAMP)",
             (experiment_id,),
         )
         self.conn.commit()
@@ -100,18 +121,19 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         serialized_params = json.dumps(params)
         cursor.execute(
-            "INSERT INTO models (run_id, name, parameters) VALUES (?, ?, ?)",
+            "INSERT INTO models (run_id, model_name, parameters) VALUES (?, ?, ?)",
             (run_id, name, serialized_params),
         )
         self.conn.commit()
 
     def _log_metric(self, run_id: int, name: str, value: float) -> None:
         cursor = self.conn.cursor()
+        rounded_value = smart_round(value)
         cursor.execute(
-            """INSERT INTO metrics (run_id, name, value)
+            """INSERT INTO metrics (run_id, metric, metric_value)
                VALUES (?, ?, ?)
-               ON CONFLICT(run_id, name) DO UPDATE SET value = ?""",
-            (run_id, name, value, value),
+               ON CONFLICT(run_id, metric) DO UPDATE SET metric_value = ?""",
+            (run_id, name, rounded_value, rounded_value),
         )
 
     def _calculate_default_metrics(
@@ -121,7 +143,7 @@ class ExperimentTracker:
         rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
 
-        metrics = [("rmse", rmse), ("mae", mae)]
+        metrics = [("rmse", smart_round(rmse)), ("mae", smart_round(mae))]
         for name, value in metrics:
             self._log_metric(run_id, name, value)
 
@@ -141,7 +163,7 @@ class ExperimentTracker:
             raise ValueError("index must have the same length as preds and actuals")
 
         cursor = self.conn.cursor()
-        cursor.execute("SELECT id FROM runs WHERE id = ?", (run_id,))
+        cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (run_id,))
         if cursor.fetchone() is None:
             raise ValueError(f"Run ID {run_id} does not exist")
 
@@ -149,13 +171,13 @@ class ExperimentTracker:
             for pred, actual in zip(preds, actuals):
                 cursor.execute(
                     "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
-                    (run_id, pred, actual),
+                    (run_id, smart_round(pred), smart_round(actual)),
                 )
         else:
             for pred, actual, idx in zip(preds, actuals, index):
                 cursor.execute(
                     "INSERT INTO predictions (run_id, idx, prediction, actual) VALUES (?, ?, ?, ?)",
-                    (run_id, idx, pred, actual),
+                    (run_id, idx, smart_round(pred), smart_round(actual)),
                 )
 
         self._calculate_default_metrics(run_id, preds, actuals)
@@ -174,10 +196,10 @@ class ExperimentTracker:
         status = "COMPLETED" if success else "FAILED"
         cursor.execute(
             """UPDATE runs
-            SET status = ?,
-                end_time = CURRENT_TIMESTAMP,
+            SET run_status = ?,
+                run_end_time = CURRENT_TIMESTAMP,
                 error = ?
-            WHERE id = ?""",
+            WHERE run_id = ?""",
             (status, error, run_id),
         )
         self.conn.commit()
@@ -185,7 +207,7 @@ class ExperimentTracker:
     def get_experiment(self, experiment_id: int) -> dict | None:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, name, description, created_at FROM experiments WHERE id = ?",
+            "SELECT experiment_id, experiment_name, experiment_description, created_time FROM experiments WHERE experiment_id = ?",
             (experiment_id,),
         )
         row = cursor.fetchone()
@@ -197,27 +219,26 @@ class ExperimentTracker:
     def get_run_history(self, experiment_id: int) -> list[dict]:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, experiment_id, status, start_time, end_time, error FROM runs WHERE experiment_id = ? ORDER BY start_time DESC",
+            "SELECT run_id, experiment_id, run_status, run_start_time, run_end_time, error FROM runs WHERE experiment_id = ? ORDER BY run_start_time DESC",
             (experiment_id,),
         )
         rows = cursor.fetchall()
         columns = [col[0] for col in cursor.description]
         return [dict(zip(columns, row)) for row in rows]
 
-    def get_models(self, run_id: int) -> list[dict]:
+    def get_model(self, run_id: int) -> dict | None:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, run_id, name, parameters, created_at FROM models WHERE run_id = ?",
+            "SELECT model_id, run_id, model_name, parameters FROM models WHERE run_id = ?",
             (run_id,),
         )
-        rows = cursor.fetchall()
+        row = cursor.fetchone()
+        if row is None:
+            return None
         columns = [col[0] for col in cursor.description]
-        models = []
-        for row in rows:
-            entry = dict(zip(columns, row))
-            entry["parameters"] = json.loads(entry["parameters"])
-            models.append(entry)
-        return models
+        model = dict(zip(columns, row))
+        model["parameters"] = json.loads(model["parameters"])
+        return model
 
     def get_predictions(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
@@ -241,7 +262,9 @@ class ExperimentTracker:
 
     def get_metrics(self, run_id: int) -> dict:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT name, value FROM metrics WHERE run_id = ?", (run_id,))
+        cursor.execute(
+            "SELECT metric, metric_value FROM metrics WHERE run_id = ?", (run_id,)
+        )
         rows = cursor.fetchall()
         if not rows:
             raise ValueError(f"No metrics found for run id {run_id}")
@@ -255,9 +278,12 @@ class ExperimentTracker:
 
         cursor = self.conn.cursor()
         if entity_type == "experiment":
-            cursor.execute("SELECT id FROM experiments WHERE id = ?", (entity_id,))
+            cursor.execute(
+                "SELECT experiment_id FROM experiments WHERE experiment_id = ?",
+                (entity_id,),
+            )
         else:
-            cursor.execute("SELECT id FROM runs WHERE id = ?", (entity_id,))
+            cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (entity_id,))
 
         if cursor.fetchone() is None:
             raise ValueError(
@@ -265,7 +291,7 @@ class ExperimentTracker:
             )
 
         cursor.execute(
-            "INSERT INTO tags (entity_type, entity_id, name, value) VALUES (?, ?, ?, ?)",
+            "INSERT INTO tags (entity_type, entity_id, tag, tag_value) VALUES (?, ?, ?, ?)",
             (entity_type, entity_id, tag_name, tag_value),
         )
         self.conn.commit()
@@ -277,7 +303,7 @@ class ExperimentTracker:
 
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT name, value FROM tags WHERE entity_type = ? AND entity_id = ?",
+            "SELECT tag, tag_value FROM tags WHERE entity_type = ? AND entity_id = ?",
             (entity_type, entity_id),
         )
         return {name: value for name, value in cursor.fetchall()}
@@ -291,12 +317,12 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         if tag_value is None:
             cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND name = ?",
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag = ?",
                 (entity_type, tag_name),
             )
         else:
             cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND name = ? AND value = ?",
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag = ? AND tag_value = ?",
                 (entity_type, tag_name, tag_value),
             )
 
@@ -311,12 +337,12 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         if tag_value is None:
             cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ?",
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag = ?",
                 (entity_type, entity_id, tag_name),
             )
         else:
             cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ? AND value = ?",
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag = ? AND tag_value = ?",
                 (entity_type, entity_id, tag_name, tag_value),
             )
 
@@ -332,7 +358,7 @@ class ExperimentTracker:
         if not os.path.exists(export_dir):
             os.makedirs(export_dir)
 
-        exp_name = experiment["name"].replace(" ", "_")
+        exp_name = experiment["experiment_name"].replace(" ", "_")
         exp_export_dir = os.path.join(
             export_dir, f"experiment_{experiment_id}_{exp_name}"
         )
@@ -347,13 +373,20 @@ class ExperimentTracker:
     def _export_experiment_data(self, experiment: dict, export_dir: str) -> None:
         with open(os.path.join(export_dir, "experiments.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["id", "name", "description", "created_at"])
             writer.writerow(
                 [
-                    experiment["id"],
-                    experiment["name"],
-                    experiment["description"] or "",
-                    experiment["created_at"],
+                    "experiment_id",
+                    "experiment_name",
+                    "experiment_description",
+                    "created_time",
+                ]
+            )
+            writer.writerow(
+                [
+                    experiment["experiment_id"],
+                    experiment["experiment_name"],
+                    experiment["experiment_description"] or "",
+                    experiment["created_time"],
                 ]
             )
 
@@ -363,16 +396,23 @@ class ExperimentTracker:
         with open(os.path.join(export_dir, "runs.csv"), "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(
-                ["id", "experiment_id", "status", "start_time", "end_time", "error"]
+                [
+                    "run_id",
+                    "experiment_id",
+                    "run_status",
+                    "run_start_time",
+                    "run_end_time",
+                    "error",
+                ]
             )
             for run in runs:
                 writer.writerow(
                     [
-                        run["id"],
+                        run["run_id"],
                         experiment_id,
-                        run["status"],
-                        run["start_time"],
-                        run["end_time"] or "",
+                        run["run_status"],
+                        run["run_start_time"],
+                        run["run_end_time"] or "",
                         run["error"] or "",
                     ]
                 )
@@ -384,18 +424,17 @@ class ExperimentTracker:
     def _export_models_data(self, runs: list, export_dir: str) -> None:
         with open(os.path.join(export_dir, "models.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["id", "run_id", "name", "parameters", "created_at"])
+            writer.writerow(["model_id", "run_id", "model_name", "parameters"])
             for run in runs:
                 try:
-                    models = self.get_models(run["id"])
-                    for model in models:
+                    model = self.get_model(run["run_id"])
+                    if model:
                         writer.writerow(
                             [
-                                model["id"],
-                                run["id"],
-                                model["name"],
+                                model["model_id"],
+                                run["run_id"],
+                                model["model_name"],
                                 json.dumps(model["parameters"]),
-                                model["created_at"],
                             ]
                         )
                 except ValueError:
@@ -407,11 +446,11 @@ class ExperimentTracker:
             writer.writerow(["run_id", "prediction", "actual", "idx"])
             for run in runs:
                 try:
-                    predictions = self.get_predictions(run["id"])
+                    predictions = self.get_predictions(run["run_id"])
                     for i, pred in enumerate(predictions["predictions"]):
                         writer.writerow(
                             [
-                                run["id"],
+                                run["run_id"],
                                 pred,
                                 predictions["actuals"][i],
                                 predictions["index"][i]
@@ -425,26 +464,26 @@ class ExperimentTracker:
     def _export_metrics_data(self, runs: list, export_dir: str) -> None:
         with open(os.path.join(export_dir, "metrics.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["run_id", "name", "value"])
+            writer.writerow(["run_id", "metric", "metric_value"])
             for run in runs:
                 try:
-                    metrics = self.get_metrics(run["id"])
+                    metrics = self.get_metrics(run["run_id"])
                     for name, value in metrics.items():
-                        writer.writerow([run["id"], name, value])
+                        writer.writerow([run["run_id"], name, value])
                 except ValueError:
                     continue
 
     def _export_tags_data(self, experiment_id: int, export_dir: str) -> None:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, entity_type, entity_id, name, value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT id FROM runs WHERE experiment_id = ?))",
+            "SELECT tag_id, entity_type, entity_id, tag, tag_value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT run_id FROM runs WHERE experiment_id = ?))",
             (experiment_id, experiment_id),
         )
         tags = cursor.fetchall()
 
         with open(os.path.join(export_dir, "tags.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["id", "entity_type", "entity_id", "name", "value"])
+            writer.writerow(["tag_id", "entity_type", "entity_id", "tag", "tag_value"])
             for tag in tags:
                 writer.writerow(tag)
 
@@ -564,7 +603,7 @@ class ExperimentTracker:
     def list_experiments(self, limit: int = 10) -> list[dict]:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, name, description, created_at FROM experiments ORDER BY created_at DESC LIMIT ?",
+            "SELECT experiment_id, experiment_name, experiment_description, created_time FROM experiments ORDER BY created_time DESC LIMIT ?",
             (limit,),
         )
         rows = cursor.fetchall()
@@ -574,7 +613,7 @@ class ExperimentTracker:
     def find_experiments(self, name_pattern: str) -> list[dict]:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT id, name, description, created_at FROM experiments WHERE name LIKE ? ORDER BY created_at DESC",
+            "SELECT experiment_id, experiment_name, experiment_description, created_time FROM experiments WHERE experiment_name LIKE ? ORDER BY created_time DESC",
             (f"%{name_pattern}%",),
         )
         rows = cursor.fetchall()
@@ -583,9 +622,14 @@ class ExperimentTracker:
 
     def delete_experiment(self, experiment_id: int) -> None:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT id FROM experiments WHERE id = ?", (experiment_id,))
+        cursor.execute(
+            "SELECT experiment_id FROM experiments WHERE experiment_id = ?",
+            (experiment_id,),
+        )
         if cursor.fetchone() is None:
             raise ValueError(f"Experiment ID {experiment_id} does not exist")
 
-        cursor.execute("DELETE FROM experiments WHERE id = ?", (experiment_id,))
+        cursor.execute(
+            "DELETE FROM experiments WHERE experiment_id = ?", (experiment_id,)
+        )
         self.conn.commit()

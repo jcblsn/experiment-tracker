@@ -45,7 +45,7 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT name, description, created_at FROM experiments WHERE id=?",
+            "SELECT experiment_name, experiment_description, created_time FROM experiments WHERE experiment_id=?",
             (exp_id,),
         )
         result = cursor.fetchone()
@@ -65,7 +65,8 @@ class TestExperimentTracker(unittest.TestCase):
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
-            "SELECT experiment_id, status, start_time FROM runs WHERE id=?", (run_id,)
+            "SELECT experiment_id, run_status, run_start_time FROM runs WHERE run_id=?",
+            (run_id,),
         )
         result = cursor.fetchone()
 
@@ -87,7 +88,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.log_model(run_id, "test_model", test_params)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT name, parameters FROM models WHERE run_id=?", (run_id,))
+        cursor.execute(
+            "SELECT model_name, parameters FROM models WHERE run_id=?", (run_id,)
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Model record should exist")
@@ -163,7 +166,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.end_run(run_id)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT status, end_time, error FROM runs WHERE id=?", (run_id,))
+        cursor.execute(
+            "SELECT run_status, run_end_time, error FROM runs WHERE run_id=?", (run_id,)
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Run record should exist")
@@ -178,7 +183,9 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.end_run(run_id, success=False, error=error_msg)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT status, end_time, error FROM runs WHERE id=?", (run_id,))
+        cursor.execute(
+            "SELECT run_status, run_end_time, error FROM runs WHERE run_id=?", (run_id,)
+        )
         result = cursor.fetchone()
 
         self.assertIsNotNone(result, "Run record should exist")
@@ -198,10 +205,12 @@ class TestExperimentTracker(unittest.TestCase):
         self.tracker.end_run(run_id)
 
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT name FROM experiments WHERE id=?", (exp_id,))
+        cursor.execute(
+            "SELECT experiment_name FROM experiments WHERE experiment_id=?", (exp_id,)
+        )
         self.assertEqual(cursor.fetchone()[0], "Integration Test")
 
-        cursor.execute("SELECT status FROM runs WHERE id=?", (run_id,))
+        cursor.execute("SELECT run_status FROM runs WHERE run_id=?", (run_id,))
         self.assertEqual(cursor.fetchone()[0], "COMPLETED")
 
         cursor.execute("SELECT parameters FROM models WHERE run_id=?", (run_id,))
@@ -231,7 +240,9 @@ class TestExperimentTracker(unittest.TestCase):
         mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
         self.tracker.log_predictions(run_id, preds, actuals)
         cursor = self.tracker.conn.cursor()
-        cursor.execute("SELECT name, value FROM metrics WHERE run_id=?", (run_id,))
+        cursor.execute(
+            "SELECT metric, metric_value FROM metrics WHERE run_id=?", (run_id,)
+        )
         rows = cursor.fetchall()
         self.assertEqual(len(rows), 2, "Should insert two metrics entries")
         metrics = {name: value for name, value in rows}
@@ -322,7 +333,15 @@ class TestExperimentTracker(unittest.TestCase):
             with open(os.path.join(export_path, "experiments.csv"), "r") as f:
                 reader = csv.reader(f)
                 headers = next(reader)
-                self.assertEqual(headers, ["id", "name", "description", "created_at"])
+                self.assertEqual(
+                    headers,
+                    [
+                        "experiment_id",
+                        "experiment_name",
+                        "experiment_description",
+                        "created_time",
+                    ],
+                )
 
             with open(os.path.join(export_path, "runs.csv"), "r") as f:
                 reader = csv.reader(f)
@@ -330,11 +349,11 @@ class TestExperimentTracker(unittest.TestCase):
                 self.assertEqual(
                     headers,
                     [
-                        "id",
+                        "run_id",
                         "experiment_id",
-                        "status",
-                        "start_time",
-                        "end_time",
+                        "run_status",
+                        "run_start_time",
+                        "run_end_time",
                         "error",
                     ],
                 )
@@ -345,7 +364,7 @@ class TestExperimentTracker(unittest.TestCase):
                 reader = csv.reader(f)
                 headers = next(reader)
                 self.assertEqual(
-                    headers, ["id", "run_id", "name", "parameters", "created_at"]
+                    headers, ["model_id", "run_id", "model_name", "parameters"]
                 )
                 rows = list(reader)
                 self.assertEqual(len(rows), 2)
@@ -385,19 +404,19 @@ class TestExperimentTracker(unittest.TestCase):
             new_exp_id = target_tracker.import_experiment(export_path)
 
             imported_exp = target_tracker.get_experiment(new_exp_id)
-            self.assertEqual(imported_exp["name"], "Import Test")
+            self.assertEqual(imported_exp["experiment_name"], "Import Test")
             self.assertEqual(
-                imported_exp["description"], "Testing import functionality"
+                imported_exp["experiment_description"], "Testing import functionality"
             )
 
             runs = target_tracker.get_run_history(new_exp_id)
             self.assertEqual(len(runs), 1)
 
-            new_run_id = runs[0]["id"]
-            models = target_tracker.get_models(new_run_id)
-            self.assertEqual(len(models), 1)
-            self.assertEqual(models[0]["name"], "ImportModel")
-            self.assertEqual(models[0]["parameters"]["learning_rate"], 0.01)
+            new_run_id = runs[0]["run_id"]
+            model = target_tracker.get_model(new_run_id)
+            self.assertIsNotNone(model)
+            self.assertEqual(model["model_name"], "ImportModel")
+            self.assertEqual(model["parameters"]["learning_rate"], 0.01)
 
             predictions = target_tracker.get_predictions(new_run_id)
             self.assertEqual(predictions["predictions"], preds)
@@ -472,7 +491,7 @@ class TestExperimentTracker(unittest.TestCase):
             new_exp_id = target_tracker.import_experiment(export_path)
 
             runs = target_tracker.get_run_history(new_exp_id)
-            new_run_id = runs[0]["id"]
+            new_run_id = runs[0]["run_id"]
 
             exp_tags = target_tracker.get_tags("experiment", new_exp_id)
             self.assertEqual(exp_tags["category"], "test")
@@ -493,8 +512,8 @@ class TestExperimentTracker(unittest.TestCase):
         exp_id = self.tracker.create_experiment(exp_name, exp_description)
         experiment = self.tracker.get_experiment(exp_id)
         self.assertIsNotNone(experiment, "Experiment should be retrieved successfully")
-        self.assertEqual(experiment.get("name"), exp_name)
-        self.assertEqual(experiment.get("description"), exp_description)
+        self.assertEqual(experiment.get("experiment_name"), exp_name)
+        self.assertEqual(experiment.get("experiment_description"), exp_description)
 
     def test_get_run_history(self):
         exp_name = "run_history_test"
@@ -507,22 +526,21 @@ class TestExperimentTracker(unittest.TestCase):
         )
         for run in history:
             self.assertEqual(run["experiment_id"], exp_id)
-        start_times = [run["start_time"] for run in history]
+        start_times = [run["run_start_time"] for run in history]
         self.assertEqual(
             start_times,
             sorted(start_times, reverse=True),
             "Runs should be ordered by start_time descending",
         )
 
-    def test_get_models(self):
-        exp_id = self.tracker.create_experiment("get_models_test")
+    def test_get_model(self):
+        exp_id = self.tracker.create_experiment("get_model_test")
         run_id = self.tracker.start_run(exp_id)
         params = {"alpha": 0.5, "l1_ratio": 0.7}
         self.tracker.log_model(run_id, "TestModel", params)
-        models = self.tracker.get_models(run_id)
-        self.assertEqual(len(models), 1, "Should retrieve one model")
-        model = models[0]
-        self.assertEqual(model["name"], "TestModel")
+        model = self.tracker.get_model(run_id)
+        self.assertIsNotNone(model, "Should retrieve one model")
+        self.assertEqual(model["model_name"], "TestModel")
         self.assertEqual(model["parameters"], params, "Model parameters should match")
 
     def test_list_experiments(self) -> None:
@@ -531,7 +549,7 @@ class TestExperimentTracker(unittest.TestCase):
 
         experiments = self.tracker.list_experiments()
         self.assertEqual(len(experiments), 2)
-        experiment_ids = {exp["id"] for exp in experiments}
+        experiment_ids = {exp["experiment_id"] for exp in experiments}
         self.assertIn(exp1, experiment_ids)
         self.assertIn(exp2, experiment_ids)
 
@@ -542,7 +560,7 @@ class TestExperimentTracker(unittest.TestCase):
 
         ml_experiments = self.tracker.find_experiments("ML")
         self.assertEqual(len(ml_experiments), 2)
-        experiment_ids = {exp["id"] for exp in ml_experiments}
+        experiment_ids = {exp["experiment_id"] for exp in ml_experiments}
         self.assertIn(exp1, experiment_ids)
         self.assertIn(exp3, experiment_ids)
         self.assertNotIn(exp2, experiment_ids)

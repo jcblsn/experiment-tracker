@@ -49,12 +49,12 @@ best_model = tracker.get_best_model(exp_id, "rmse")
 
 ## Schema
 
-- **experiments**: experiment_id, experiment_name, experiment_description, created_time
-- **runs**: run_id, experiment_id, run_status, run_start_time, run_end_time, error
-- **models**: model_id, run_id, model_name, parameters
-- **predictions**: prediction_id, run_id, idx, prediction, actual
-- **metrics**: run_id, metric, metric_value
-- **tags**: tag_id, entity_type, entity_id, tag, tag_value
+- experiments: experiment_id, experiment_name, experiment_description, created_time
+- runs: run_id, experiment_id, run_status, run_start_time, run_end_time, error
+- models: model_id, run_id, model_name, parameters
+- predictions: prediction_id, run_id, idx, prediction, actual
+- metrics: run_id, metric, metric_value
+- tags: tag_id, entity_type, entity_id, tag, tag_value
 
 ## Testing
 

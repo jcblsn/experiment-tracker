@@ -23,28 +23,31 @@ For more about `uv` see [here](https://docs.astral.sh/uv/).
 
 ## Usage
 
-The following pseudocode illustrates some simple use cases.
+Example usage (for illustration only):
 
 ```python
 from experiment_tracker import ExperimentTracker
 
 tracker = ExperimentTracker("experiments.db")
 
+preds = [...] # your model predictions
+actuals = [...] # actual values
+model_bytes = b"" # serialized model bytes
 
-# Create experiment, model
-exp_id = tracker.create_experiment("Model Comparison", "Testing different algorithms")
+# Create experiment
+exp_id = tracker.create_experiment(experiment_name="Comparing models", experiment_description="For demonstration purposes")
 
-tracker.log_model(run_id, "OLS", params={"intercept": True, "transform_response": "log"})
+# Run with context manager
+with tracker.run(exp_id, tags={"model": "ols", "dataset": "train"}) as run:
+    run.log_model(model_name="OLS", parameters={"intercept": True, "normalize": False})
+    run.log_predictions(predictions=preds, actual_values=actuals, metrics=["rmse", "mae"])
+    run.log_artifact(data=model_bytes, artifact_type="model", filename="ols_model.pkl")
 
-# Log results
-run_id = tracker.start_run(exp_id)
-tracker.log_predictions(run_id, preds=[0.8, 0.9, 0.7], actuals=[0.85, 0.88, 0.72])
-tracker.log_metric(run_id, "SSE", 0.0033)
-tracker.add_tag("run", run_id, tag_name="dataset", tag_value="train")
-tracker.end_run(run_id)
+# Query runs by tags
+run_ids = tracker.find_runs({"model": "ols"}, exp_id)
 
-# Retrieve
-tracker.get_run_history(exp_id)
+# Aggregate metrics across runs
+results = tracker.aggregate(exp_id, "rmse", group_by=["model"])
 ```
 
 ## Schema
@@ -54,7 +57,8 @@ tracker.get_run_history(exp_id)
 - models: model_id, run_id, model_name, parameters
 - predictions: prediction_id, run_id, idx, prediction, actual
 - metrics: run_id, metric, metric_value
-- tags: tag_id, entity_type, entity_id, tag, tag_value
+- tags: tag_id, entity_type, entity_id, tag_name, tag_value
+- artifacts: artifact_id, run_id, artifact_type, filename, data, created_time
 
 ## Testing
 

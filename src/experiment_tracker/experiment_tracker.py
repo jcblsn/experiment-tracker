@@ -3,7 +3,9 @@ import json
 import math
 import os
 import sqlite3
-from typing import Union
+from datetime import datetime
+from enum import Enum
+from typing import Any, Callable, Union
 
 
 def smart_round(
@@ -27,6 +29,71 @@ def smart_round(
     return round(value, digits)
 
 
+def default_serializer(obj: Any) -> Any:
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    elif isinstance(obj, Enum):
+        return obj.name
+    elif hasattr(obj, "__dict__"):
+        return str(obj)
+    else:
+        return obj
+
+
+class RunHandle:
+    def __init__(self, tracker: "ExperimentTracker", run_id: int):
+        self.tracker = tracker
+        self.run_id = run_id
+        self._error = None
+
+    def log_model(
+        self,
+        model_name: str,
+        parameters: dict,
+        serializer: Callable[[Any], Any] | None = None,
+    ) -> None:
+        self.tracker.log_model(self.run_id, model_name, parameters, serializer)
+
+    def log_predictions(
+        self,
+        predictions: list[float],
+        actual_values: list[float],
+        index: list[int] | None = None,
+        metrics: list[str] | None = None,
+        update: bool = True,
+        custom_metrics: dict[str, callable] | None = None,
+    ) -> None:
+        self.tracker.log_predictions(
+            self.run_id,
+            predictions,
+            actual_values,
+            index,
+            metrics,
+            update,
+            custom_metrics,
+        )
+
+    def log_artifact(self, data: bytes, artifact_type: str, filename: str) -> int:
+        return self.tracker.log_artifact(self.run_id, data, artifact_type, filename)
+
+    def log_metric(self, metric_name: str, value: float) -> None:
+        self.tracker.log_metric(self.run_id, metric_name, value)
+
+    def log_tag(self, tag_name: str, tag_value: str = "") -> int:
+        return self.tracker.log_tag("run", self.run_id, tag_name, tag_value)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            self.tracker.end_run(self.run_id, success=True)
+        else:
+            error_msg = str(exc_val) if exc_val else f"{exc_type.__name__} occurred"
+            self.tracker.end_run(self.run_id, success=False, error=error_msg)
+        return False
+
+
 class ExperimentTracker:
     def __init__(self, db_path: str = "experiments.db"):
         self.conn = sqlite3.connect(db_path)
@@ -36,28 +103,33 @@ class ExperimentTracker:
     def _initialize_db(self):
         cursor = self.conn.cursor()
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS experiments (
                 experiment_id INTEGER PRIMARY KEY,
                 experiment_name TEXT NOT NULL,
                 experiment_description TEXT,
-                created_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_time TEXT DEFAULT (datetime('now'))
             )
-        """)
+        """
+        )
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS runs (
                 run_id INTEGER PRIMARY KEY,
                 experiment_id INTEGER,
                 run_status TEXT CHECK(run_status IN ('RUNNING', 'COMPLETED', 'FAILED')),
-                run_start_time TIMESTAMP,
-                run_end_time TIMESTAMP,
+                run_start_time TEXT,
+                run_end_time TEXT,
                 error TEXT,
                 FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
             )
-        """)
+        """
+        )
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS models (
                 model_id INTEGER PRIMARY KEY,
                 run_id INTEGER,
@@ -65,9 +137,11 @@ class ExperimentTracker:
                 parameters TEXT,
                 FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
-        """)
+        """
+        )
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS predictions (
                 prediction_id INTEGER PRIMARY KEY,
                 run_id INTEGER,
@@ -76,8 +150,10 @@ class ExperimentTracker:
                 actual REAL,
                 FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
-        """)
-        cursor.execute("""
+        """
+        )
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS metrics (
                 run_id INTEGER,
                 metric TEXT NOT NULL,
@@ -85,25 +161,44 @@ class ExperimentTracker:
                 UNIQUE(run_id, metric),
                 FOREIGN KEY (run_id) REFERENCES runs(run_id)
             )
-        """)
+        """
+        )
 
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS tags (
                 tag_id INTEGER PRIMARY KEY,
                 entity_type TEXT CHECK(entity_type IN ('experiment', 'run')),
                 entity_id INTEGER,
-                tag TEXT NOT NULL,
+                tag_name TEXT NOT NULL,
                 tag_value TEXT
             )
-        """)
+        """
+        )
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS artifacts (
+                artifact_id INTEGER PRIMARY KEY,
+                run_id INTEGER,
+                artifact_type TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                data BLOB NOT NULL,
+                created_time TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (run_id) REFERENCES runs(run_id)
+            )
+        """
+        )
 
         self.conn.commit()
 
-    def create_experiment(self, name: str, description: str | None = None) -> int:
+    def create_experiment(
+        self, experiment_name: str, experiment_description: str | None = None
+    ) -> int:
         cursor = self.conn.cursor()
         cursor.execute(
             "INSERT INTO experiments (experiment_name, experiment_description) VALUES (?, ?)",
-            (name, description),
+            (experiment_name, experiment_description),
         )
         self.conn.commit()
         return cursor.lastrowid
@@ -111,83 +206,174 @@ class ExperimentTracker:
     def start_run(self, experiment_id: int) -> int:
         cursor = self.conn.cursor()
         cursor.execute(
-            "INSERT INTO runs (experiment_id, run_status, run_start_time) VALUES (?, 'RUNNING', CURRENT_TIMESTAMP)",
+            "INSERT INTO runs (experiment_id, run_status, run_start_time) VALUES (?, 'RUNNING', datetime('now'))",
             (experiment_id,),
         )
         self.conn.commit()
         return cursor.lastrowid
 
-    def log_model(self, run_id: int, name: str, params: dict) -> None:
+    def run(self, experiment_id: int, tags: dict[str, str] | None = None) -> RunHandle:
+        run_id = self.start_run(experiment_id)
+        if tags:
+            for tag_name, tag_value in tags.items():
+                self.log_tag("run", run_id, tag_name, tag_value)
+        return RunHandle(self, run_id)
+
+    def log_model(
+        self,
+        run_id: int,
+        model_name: str,
+        parameters: dict,
+        serializer: Callable[[Any], Any] | None = None,
+    ) -> None:
         cursor = self.conn.cursor()
-        serialized_params = json.dumps(params)
+        if serializer is None:
+            serializer = default_serializer
+
+        def serialize_recursive(obj):
+            if isinstance(obj, dict):
+                return {k: serialize_recursive(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [serialize_recursive(item) for item in obj]
+            else:
+                return serializer(obj)
+
+        serialized_params = json.dumps(serialize_recursive(parameters))
         cursor.execute(
             "INSERT INTO models (run_id, model_name, parameters) VALUES (?, ?, ?)",
-            (run_id, name, serialized_params),
+            (run_id, model_name, serialized_params),
         )
         self.conn.commit()
 
-    def _log_metric(self, run_id: int, name: str, value: float) -> None:
+    def _log_metric(self, run_id: int, metric_name: str, value: float) -> None:
         cursor = self.conn.cursor()
         rounded_value = smart_round(value)
         cursor.execute(
             """INSERT INTO metrics (run_id, metric, metric_value)
                VALUES (?, ?, ?)
                ON CONFLICT(run_id, metric) DO UPDATE SET metric_value = ?""",
-            (run_id, name, rounded_value, rounded_value),
+            (run_id, metric_name, rounded_value, rounded_value),
         )
 
     def _calculate_default_metrics(
-        self, run_id: int, preds: list[float], actuals: list[float]
+        self,
+        run_id: int,
+        predictions: list[float],
+        actual_values: list[float],
+        metrics: list[str] | None = None,
     ) -> None:
-        n = len(preds)
-        rmse = math.sqrt(sum((p - a) ** 2 for p, a in zip(preds, actuals)) / n)
-        mae = sum(abs(p - a) for p, a in zip(preds, actuals)) / n
+        if metrics is None:
+            metrics = ["rmse", "mae"]
 
-        metrics = [("rmse", smart_round(rmse)), ("mae", smart_round(mae))]
-        for name, value in metrics:
-            self._log_metric(run_id, name, value)
+        n = len(predictions)
+        available_metrics = {
+            "rmse": lambda: math.sqrt(
+                sum((p - a) ** 2 for p, a in zip(predictions, actual_values)) / n
+            ),
+            "mae": lambda: sum(abs(p - a) for p, a in zip(predictions, actual_values))
+            / n,
+            "mape": lambda: (
+                (
+                    sum(
+                        abs((a - p) / a)
+                        for p, a in zip(predictions, actual_values)
+                        if a != 0
+                    )
+                    / sum(1 for a in actual_values if a != 0)
+                )
+                if any(a != 0 for a in actual_values)
+                else 0
+            ),
+        }
+
+        for metric_name in metrics:
+            if metric_name in available_metrics:
+                value = available_metrics[metric_name]()
+                self._log_metric(run_id, metric_name, value)
 
     def log_predictions(
         self,
         run_id: int,
-        preds: list[float],
-        actuals: list[float],
+        predictions: list[float],
+        actual_values: list[float],
         index: list[int] | None = None,
+        metrics: list[str] | None = None,
+        update: bool = True,
         custom_metrics: dict[str, callable] | None = None,
     ) -> None:
-        if not isinstance(preds, list) or not isinstance(actuals, list):
-            raise TypeError("preds and actuals must be lists")
-        if len(preds) != len(actuals):
-            raise ValueError("preds and actuals must have the same length")
-        if index is not None and len(index) != len(preds):
-            raise ValueError("index must have the same length as preds and actuals")
+        if not isinstance(predictions, list) or not isinstance(actual_values, list):
+            raise TypeError("predictions and actual_values must be lists")
+        if len(predictions) != len(actual_values):
+            raise ValueError("predictions and actual_values must have the same length")
+        if index is not None and len(index) != len(predictions):
+            raise ValueError(
+                "index must have the same length as predictions and actual_values"
+            )
 
         cursor = self.conn.cursor()
         cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (run_id,))
         if cursor.fetchone() is None:
             raise ValueError(f"Run ID {run_id} does not exist")
 
+        if update:
+            cursor.execute("DELETE FROM predictions WHERE run_id = ?", (run_id,))
+
         if index is None:
-            for pred, actual in zip(preds, actuals):
+            for pred, actual in zip(predictions, actual_values):
                 cursor.execute(
                     "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
                     (run_id, smart_round(pred), smart_round(actual)),
                 )
         else:
-            for pred, actual, idx in zip(preds, actuals, index):
+            for pred, actual, idx in zip(predictions, actual_values, index):
                 cursor.execute(
                     "INSERT INTO predictions (run_id, idx, prediction, actual) VALUES (?, ?, ?, ?)",
                     (run_id, idx, smart_round(pred), smart_round(actual)),
                 )
 
-        self._calculate_default_metrics(run_id, preds, actuals)
+        self._calculate_default_metrics(run_id, predictions, actual_values, metrics)
 
         if custom_metrics:
             for name, metric_fn in custom_metrics.items():
-                value = metric_fn(preds, actuals)
+                value = metric_fn(predictions, actual_values)
                 self._log_metric(run_id, name, value)
 
         self.conn.commit()
+
+    def log_artifact(
+        self, run_id: int, data: bytes, artifact_type: str, filename: str
+    ) -> int:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (run_id,))
+        if cursor.fetchone() is None:
+            raise ValueError(f"Run ID {run_id} does not exist")
+
+        cursor.execute(
+            "INSERT INTO artifacts (run_id, artifact_type, filename, data) VALUES (?, ?, ?, ?)",
+            (run_id, artifact_type, filename, data),
+        )
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_artifacts(self, run_id: int) -> list[dict]:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT artifact_id, artifact_type, filename, created_time FROM artifacts WHERE run_id = ? ORDER BY created_time",
+            (run_id,),
+        )
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_artifact_data(self, artifact_id: int) -> bytes:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT data FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise ValueError(f"Artifact ID {artifact_id} does not exist")
+        return row[0]
 
     def end_run(
         self, run_id: int, success: bool = True, error: str | None = None
@@ -197,7 +383,7 @@ class ExperimentTracker:
         cursor.execute(
             """UPDATE runs
             SET run_status = ?,
-                run_end_time = CURRENT_TIMESTAMP,
+                run_end_time = datetime('now'),
                 error = ?
             WHERE run_id = ?""",
             (status, error, run_id),
@@ -256,8 +442,8 @@ class ExperimentTracker:
 
         return {"predictions": preds, "actuals": actuals, "index": index}
 
-    def log_metric(self, run_id: int, name: str, value: float) -> None:
-        self._log_metric(run_id, name, value)
+    def log_metric(self, run_id: int, metric_name: str, value: float) -> None:
+        self._log_metric(run_id, metric_name, value)
         self.conn.commit()
 
     def get_metrics(self, run_id: int) -> dict:
@@ -270,7 +456,7 @@ class ExperimentTracker:
             raise ValueError(f"No metrics found for run id {run_id}")
         return {name: value for name, value in rows}
 
-    def add_tag(
+    def log_tag(
         self, entity_type: str, entity_id: int, tag_name: str, tag_value: str = ""
     ) -> int:
         if entity_type not in ["experiment", "run"]:
@@ -291,7 +477,7 @@ class ExperimentTracker:
             )
 
         cursor.execute(
-            "INSERT INTO tags (entity_type, entity_id, tag, tag_value) VALUES (?, ?, ?, ?)",
+            "INSERT INTO tags (entity_type, entity_id, tag_name, tag_value) VALUES (?, ?, ?, ?)",
             (entity_type, entity_id, tag_name, tag_value),
         )
         self.conn.commit()
@@ -303,7 +489,7 @@ class ExperimentTracker:
 
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT tag, tag_value FROM tags WHERE entity_type = ? AND entity_id = ?",
+            "SELECT tag_name, tag_value FROM tags WHERE entity_type = ? AND entity_id = ?",
             (entity_type, entity_id),
         )
         return {name: value for name, value in cursor.fetchall()}
@@ -317,16 +503,122 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         if tag_value is None:
             cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag = ?",
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag_name = ?",
                 (entity_type, tag_name),
             )
         else:
             cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag = ? AND tag_value = ?",
+                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag_name = ? AND tag_value = ?",
                 (entity_type, tag_name, tag_value),
             )
 
         return [row[0] for row in cursor.fetchall()]
+
+    def find_runs(
+        self, tags: dict[str, str], experiment_id: int | None = None
+    ) -> list[int]:
+        cursor = self.conn.cursor()
+
+        base_query = """
+            SELECT DISTINCT r.run_id 
+            FROM runs r
+            JOIN tags t ON t.entity_type = 'run' AND t.entity_id = r.run_id
+        """
+
+        conditions = []
+        params = []
+
+        if experiment_id is not None:
+            conditions.append("r.experiment_id = ?")
+            params.append(experiment_id)
+
+        for tag_name, tag_value in tags.items():
+            conditions.append("(t.tag_name = ? AND t.tag_value = ?)")
+            params.extend([tag_name, tag_value])
+
+        if conditions:
+            query = base_query + " WHERE " + " AND ".join(conditions)
+        else:
+            query = "SELECT run_id FROM runs" + (
+                f" WHERE experiment_id = {experiment_id}" if experiment_id else ""
+            )
+            params = []
+
+        query += f" GROUP BY r.run_id HAVING COUNT(*) = {len(tags)}" if tags else ""
+
+        cursor.execute(query, params)
+        return [row[0] for row in cursor.fetchall()]
+
+    def aggregate(
+        self,
+        experiment_id: int,
+        metric: str,
+        group_by: list[str] | None = None,
+        where_tags: dict[str, str] | None = None,
+        aggregations: list[str] | None = None,
+    ) -> list[dict]:
+        if aggregations is None:
+            aggregations = ["mean", "std", "count"]
+
+        cursor = self.conn.cursor()
+
+        agg_funcs = {
+            "mean": "AVG(m.metric_value)",
+            "std": "SQRT(AVG(m.metric_value * m.metric_value) - AVG(m.metric_value) * AVG(m.metric_value))",
+            "count": "COUNT(m.metric_value)",
+            "min": "MIN(m.metric_value)",
+            "max": "MAX(m.metric_value)",
+            "sum": "SUM(m.metric_value)",
+        }
+
+        select_parts = []
+        for agg_name in aggregations:
+            if agg_name in agg_funcs:
+                select_parts.append(f"{agg_funcs[agg_name]} as {metric}_{agg_name}")
+
+        base_query = f"""
+            SELECT {', '.join(select_parts)}
+            FROM metrics m
+            JOIN runs r ON m.run_id = r.run_id
+        """
+
+        if group_by:
+            group_select = []
+            for col in group_by:
+                if col == "model":
+                    base_query += " JOIN models mo ON r.run_id = mo.run_id"
+                    group_select.append("mo.model_name as model")
+                else:
+                    group_select.append(f"t_{col}.tag_value as {col}")
+                    base_query += f" JOIN tags t_{col} ON t_{col}.entity_type = 'run' AND t_{col}.entity_id = r.run_id AND t_{col}.tag_name = '{col}'"
+
+            select_parts = group_select + select_parts
+            base_query = f"SELECT {', '.join(select_parts)} FROM metrics m JOIN runs r ON m.run_id = r.run_id"
+
+            for col in group_by:
+                if col == "model":
+                    base_query += " JOIN models mo ON r.run_id = mo.run_id"
+                else:
+                    base_query += f" JOIN tags t_{col} ON t_{col}.entity_type = 'run' AND t_{col}.entity_id = r.run_id AND t_{col}.tag_name = '{col}'"
+
+        conditions = [f"r.experiment_id = {experiment_id}", f"m.metric = '{metric}'"]
+
+        if where_tags:
+            for tag_name, tag_value in where_tags.items():
+                base_query += f" JOIN tags wt_{tag_name} ON wt_{tag_name}.entity_type = 'run' AND wt_{tag_name}.entity_id = r.run_id"
+                conditions.append(
+                    f"wt_{tag_name}.tag_name = '{tag_name}' AND wt_{tag_name}.tag_value = '{tag_value}'"
+                )
+
+        query = base_query + " WHERE " + " AND ".join(conditions)
+
+        if group_by:
+            query += f" GROUP BY {', '.join(group_by)}"
+
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
 
     def delete_tag(
         self, entity_type: str, entity_id: int, tag_name: str, tag_value: str = None
@@ -337,12 +629,12 @@ class ExperimentTracker:
         cursor = self.conn.cursor()
         if tag_value is None:
             cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag = ?",
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag_name = ?",
                 (entity_type, entity_id, tag_name),
             )
         else:
             cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag = ? AND tag_value = ?",
+                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag_name = ? AND tag_value = ?",
                 (entity_type, entity_id, tag_name, tag_value),
             )
 
@@ -453,9 +745,11 @@ class ExperimentTracker:
                                 run["run_id"],
                                 pred,
                                 predictions["actuals"][i],
-                                predictions["index"][i]
-                                if i < len(predictions["index"])
-                                else "",
+                                (
+                                    predictions["index"][i]
+                                    if i < len(predictions["index"])
+                                    else ""
+                                ),
                             ]
                         )
                 except ValueError:
@@ -476,14 +770,16 @@ class ExperimentTracker:
     def _export_tags_data(self, experiment_id: int, export_dir: str) -> None:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT tag_id, entity_type, entity_id, tag, tag_value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT run_id FROM runs WHERE experiment_id = ?))",
+            "SELECT tag_id, entity_type, entity_id, tag_name, tag_value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT run_id FROM runs WHERE experiment_id = ?))",
             (experiment_id, experiment_id),
         )
         tags = cursor.fetchall()
 
         with open(os.path.join(export_dir, "tags.csv"), "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["tag_id", "entity_type", "entity_id", "tag", "tag_value"])
+            writer.writerow(
+                ["tag_id", "entity_type", "entity_id", "tag_name", "tag_value"]
+            )
             for tag in tags:
                 writer.writerow(tag)
 
@@ -596,7 +892,7 @@ class ExperimentTracker:
                     else:
                         continue
 
-                    self.add_tag(entity_type, new_entity_id, tag_name, tag_value)
+                    self.log_tag(entity_type, new_entity_id, tag_name, tag_value)
 
         return experiment_id
 

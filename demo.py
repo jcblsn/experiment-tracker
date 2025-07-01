@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
 import os
 import shutil
 import tempfile
+import pickle
+
 
 from src.experiment_tracker.experiment_tracker import ExperimentTracker
 
@@ -11,57 +12,49 @@ def main() -> None:
     print("Initialized experiment tracker with database: experiments.db")
 
     exp_id = tracker.create_experiment(
-        "Main Experiment", "Demonstration of experiment tracker integration"
+        experiment_name="Main Experiment",
+        experiment_description="Demonstration of experiment tracker integration",
     )
-    tracker.add_tag("experiment", exp_id, "demo", "true")
-    tracker.add_tag("experiment", exp_id, "purpose", "demonstration")
+    tracker.log_tag("experiment", exp_id, "demo", "true")
+    tracker.log_tag("experiment", exp_id, "purpose", "demonstration")
     print(f"Created experiment with ID: {exp_id}")
 
-    run_id = tracker.start_run(exp_id)
-    tracker.add_tag("run", run_id, "demo", "true")
-    print(
-        f"\nStarting a new run with run ID {run_id} for experiment {exp_id} with tags: {tracker.get_tags('run', run_id)}"
-    )
+    with tracker.run(exp_id, tags={"model": "ols", "dataset": "demo"}) as run:
+        model_params = {"intercept": True, "normalize": False}
+        run.log_model(model_name="OLS", parameters=model_params)
+        print(f"\nLogged model 'OLS' with parameters: {model_params}")
 
-    model_params = {"model_type": "ExampleModel", "learning_rate": 0.01, "epochs": 10}
-    tracker.log_model(run_id, "ExampleModel", model_params)
-    print(f"\nLogged model 'ExampleModel' with parameters: {model_params}")
+        def max_error(preds, actuals):
+            return max(abs(p - a) for p, a in zip(preds, actuals))
 
-    def max_error(preds, actuals):
-        return max(abs(p - a) for p, a in zip(preds, actuals))
-
-    def median_error(preds, actuals):
-        errors = sorted(abs(p - a) for p, a in zip(preds, actuals))
-        mid = len(errors) // 2
-        return (
-            errors[mid] if len(errors) % 2 == 1 else (errors[mid - 1] + errors[mid]) / 2
+        preds = [0.125, 0.372, 0.933]
+        actuals = [0.15, 0.25, 0.35]
+        run.log_predictions(
+            predictions=preds,
+            actual_values=actuals,
+            custom_metrics={"max_error": max_error},
         )
 
-    custom_metrics = {"max_error": max_error, "median_error": median_error}
-    print(f"\nDefined custom metrics: {list(custom_metrics.keys())}")
+        model_data = {"coefficients": [1.2, -0.5, 2.1], "intercept": 0.1}
+        artifact_id = run.log_artifact(
+            data=pickle.dumps(model_data),
+            artifact_type="model",
+            filename="ols_model.pkl",
+        )
+        print(f"Logged artifact with ID: {artifact_id}")
 
-    preds = [0.125, 0.372, 0.933]
-    actuals = [0.15, 0.25, 0.35]
-    indices = [
-        1577836800,
-        1577923200,
-        1578009600,
-    ]  # timestamps as integers, for example
-    tracker.log_predictions(
-        run_id, preds, actuals, index=indices, custom_metrics=custom_metrics
-    )
-    print(f"\nLogged prediction values: {tracker.get_predictions(run_id)}")
+    print("Run completed")
+
+    found_runs = tracker.find_runs({"model": "ols"}, exp_id)
+    print(f"Found runs: {found_runs}")
+
+    run_id = found_runs[0]
     print(f"Metrics for run {run_id}: {tracker.get_metrics(run_id)}")
 
-    tracker.end_run(run_id)
-    print(
-        f"\nEnded run {run_id} with status: {tracker.get_run_history(exp_id)[0]['run_status']}"
-    )
-
-    tracker.add_tag("experiment", exp_id, "project", "demo")
-    tracker.add_tag("experiment", exp_id, "version", "1.0")
-    tracker.add_tag("run", run_id, "model_type", "simple")
-    tracker.add_tag("run", run_id, "dataset", "synthetic")
+    tracker.log_tag("experiment", exp_id, "project", "demo")
+    tracker.log_tag("experiment", exp_id, "version", "1.0")
+    tracker.log_tag("run", run_id, "model_type", "simple")
+    tracker.log_tag("run", run_id, "dataset", "synthetic")
 
     print("\nChecking experiment and run tags:")
     print(f" Experiment tags: {tracker.get_tags('experiment', exp_id)}")
@@ -82,21 +75,6 @@ def main() -> None:
         )
     if len(found_experiments) > 5:
         print(f" ...\n and {len(found_experiments) - 5} other(s)")
-
-    run_id2 = tracker.start_run(exp_id)
-    print(f"\nStarted second run with ID: {run_id2}")
-
-    tracker.log_model(run_id2, "ExampleModel", model_params)
-
-    preds2 = [0.264, 0.394, 0.876]
-    tracker.log_predictions(
-        run_id2, preds2, actuals, index=indices, custom_metrics=custom_metrics
-    )
-    print(f"Logged predictions for run {run_id2}")
-    print(f"Metrics for run {run_id2}: {tracker.get_metrics(run_id2)}")
-
-    tracker.end_run(run_id2)
-    print(f"Ended run {run_id2}")
 
     export_dir = tempfile.mkdtemp()
     print(f"\nCreated temporary directory for export: {export_dir}")
@@ -120,18 +98,6 @@ def main() -> None:
             new_tracker.get_run_history(new_exp_id)[0]["run_id"]
         )
         print(f"\nMetrics from imported run: {metrics}")
-
-        print("\nFinding best model across all runs:")
-        preferred_metric = "rmse"
-        best_model = tracker.get_best_model(exp_id, metric=preferred_metric)
-        if best_model:
-            print(f" Best model by {preferred_metric}: {best_model['model_name']}")
-            print(f" Parameters: {best_model['parameters']}")
-            print(
-                f" Average {best_model['metric_name']}: {best_model['average_metric']}"
-            )
-            print(f" Based on {best_model['num_runs']} runs")
-            print(f" Run IDs: {best_model['run_ids']}")
 
         new_tracker.conn.close()
         tracker.conn.close()

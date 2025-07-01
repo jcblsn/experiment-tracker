@@ -597,6 +597,36 @@ class TestExperimentTracker(unittest.TestCase):
 
         self.assertEqual(result["predictions"], test_preds)
         self.assertEqual(result["actuals"], test_actuals)
+
+    def test_log_predictions_without_actuals(self) -> None:
+        exp_id = self.tracker.create_experiment("predictions_only_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_preds = [0.8, 0.6, 0.9, 0.7]
+        self.tracker.log_predictions(run_id, test_preds)
+
+        result = self.tracker.get_predictions(run_id)
+        self.assertEqual(result["predictions"], test_preds)
+        self.assertEqual(result["actuals"], [None] * len(test_preds))
+
+        with self.assertRaises(ValueError):
+            self.tracker.get_metrics(run_id)
+
+    def test_log_predictions_with_index_no_actuals(self) -> None:
+        exp_id = self.tracker.create_experiment("indexed_predictions_only_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_preds = [0.5, 0.4, 0.3]
+        test_index = [100, 200, 300]
+        self.tracker.log_predictions(run_id, test_preds, index=test_index)
+
+        result = self.tracker.get_predictions(run_id)
+        self.assertEqual(result["predictions"], test_preds)
+        self.assertEqual(result["actuals"], [None] * len(test_preds))
+        self.assertEqual(result["index"], test_index)
+
+        with self.assertRaises(ValueError):
+            self.tracker.get_metrics(run_id)
         self.assertEqual(result["index"], test_index)
 
     def test_log_predictions_index_length_validation(self) -> None:

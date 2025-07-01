@@ -5,6 +5,8 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime
+from enum import Enum
 
 from src.experiment_tracker import ExperimentTracker
 
@@ -26,12 +28,15 @@ class TestExperimentTracker(unittest.TestCase):
             "predictions",
             "metrics",
             "tags",
+            "artifacts",
         }
         cursor = self.tracker.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT name FROM sqlite_master
-            WHERE type='table' AND name IN ('experiments', 'runs', 'models', 'predictions', 'metrics', 'tags')
-        """)
+            WHERE type='table' AND name IN ('experiments', 'runs', 'models', 'predictions', 'metrics', 'tags', 'artifacts')
+        """
+        )
         created_tables = {row[0] for row in cursor.fetchall()}
         self.assertEqual(
             created_tables, required_tables, "All required tables should be created"
@@ -85,7 +90,7 @@ class TestExperimentTracker(unittest.TestCase):
         run_id = self.tracker.start_run(exp_id)
 
         test_params = {"hidden_size": 128, "dropout": 0.2, "learning_rate": 0.001}
-        self.tracker.log_model(run_id, "test_model", test_params)
+        self.tracker.log_model(run_id, model_name="test_model", parameters=test_params)
 
         cursor = self.tracker.conn.cursor()
         cursor.execute(
@@ -125,10 +130,12 @@ class TestExperimentTracker(unittest.TestCase):
     def test_metrics_table_exists(self):
         """Ensure that the metrics table exists in the database."""
         cursor = self.tracker.conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT name FROM sqlite_master
             WHERE type='table' AND name='metrics'
-        """)
+        """
+        )
         result = cursor.fetchone()
         self.assertIsNotNone(result, "Metrics table should exist in the database")
 
@@ -437,12 +444,12 @@ class TestExperimentTracker(unittest.TestCase):
         exp_id = self.tracker.create_experiment("Tag Test", "Testing tag functionality")
         run_id = self.tracker.start_run(exp_id)
 
-        self.tracker.add_tag("experiment", exp_id, "version", "v1.0")
-        self.tracker.add_tag("experiment", exp_id, "owner", "test_user")
-        self.tracker.add_tag("experiment", exp_id, "priority", "high")
+        self.tracker.log_tag("experiment", exp_id, "version", "v1.0")
+        self.tracker.log_tag("experiment", exp_id, "owner", "test_user")
+        self.tracker.log_tag("experiment", exp_id, "priority", "high")
 
-        self.tracker.add_tag("run", run_id, "model_type", "regression")
-        self.tracker.add_tag("run", run_id, "dataset", "test_data")
+        self.tracker.log_tag("run", run_id, "model_type", "regression")
+        self.tracker.log_tag("run", run_id, "dataset", "test_data")
 
         exp_tags = self.tracker.get_tags("experiment", exp_id)
         self.assertEqual(len(exp_tags), 3)
@@ -479,8 +486,8 @@ class TestExperimentTracker(unittest.TestCase):
             exp_id = source_tracker.create_experiment("Tag Export Test")
             run_id = source_tracker.start_run(exp_id)
 
-            source_tracker.add_tag("experiment", exp_id, "category", "test")
-            source_tracker.add_tag("run", run_id, "algorithm", "random_forest")
+            source_tracker.log_tag("experiment", exp_id, "category", "test")
+            source_tracker.log_tag("run", run_id, "algorithm", "random_forest")
 
             source_tracker.end_run(run_id)
             export_path = source_tracker.export_experiment(exp_id, export_dir)
@@ -600,6 +607,126 @@ class TestExperimentTracker(unittest.TestCase):
             self.tracker.log_predictions(
                 run_id, [1, 2], [1, 2], index=[1]
             )  # mismatched index length
+
+    def test_enhanced_serialization(self) -> None:
+        class Status(Enum):
+            ACTIVE = "active"
+            INACTIVE = "inactive"
+
+        exp_id = self.tracker.create_experiment("serialization_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        params = {
+            "timestamp": datetime(2023, 1, 1, 12, 0, 0),
+            "status": Status.ACTIVE,
+            "normal_value": 42,
+        }
+
+        self.tracker.log_model(run_id, "test_model", params)
+        model = self.tracker.get_model(run_id)
+
+        self.assertEqual(model["parameters"]["timestamp"], "2023-01-01T12:00:00")
+        self.assertEqual(model["parameters"]["status"], "ACTIVE")
+        self.assertEqual(model["parameters"]["normal_value"], 42)
+
+    def test_artifacts(self) -> None:
+        exp_id = self.tracker.create_experiment("artifact_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        test_data = b"test binary data"
+        artifact_id = self.tracker.log_artifact(run_id, test_data, "model", "test.pkl")
+
+        self.assertIsInstance(artifact_id, int)
+
+        artifacts = self.tracker.get_artifacts(run_id)
+        self.assertEqual(len(artifacts), 1)
+        self.assertEqual(artifacts[0]["artifact_type"], "model")
+        self.assertEqual(artifacts[0]["filename"], "test.pkl")
+
+        retrieved_data = self.tracker.get_artifact_data(artifact_id)
+        self.assertEqual(retrieved_data, test_data)
+
+    def test_enhanced_log_predictions(self) -> None:
+        exp_id = self.tracker.create_experiment("enhanced_predictions_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        preds = [1.0, 2.0, 3.0]
+        actuals = [1.1, 1.9, 3.05]
+
+        self.tracker.log_predictions(
+            run_id, preds, actuals, metrics=["rmse", "mae", "mape"]
+        )
+
+        metrics = self.tracker.get_metrics(run_id)
+        self.assertIn("rmse", metrics)
+        self.assertIn("mae", metrics)
+        self.assertIn("mape", metrics)
+
+    def test_find_runs(self) -> None:
+        exp_id = self.tracker.create_experiment("find_runs_test")
+
+        run_id1 = self.tracker.start_run(exp_id)
+        self.tracker.log_tag("run", run_id1, "model", "forest")
+        self.tracker.log_tag("run", run_id1, "dataset", "iris")
+
+        run_id2 = self.tracker.start_run(exp_id)
+        self.tracker.log_tag("run", run_id2, "model", "svm")
+        self.tracker.log_tag("run", run_id2, "dataset", "iris")
+
+        forest_runs = self.tracker.find_runs({"model": "forest"}, exp_id)
+        self.assertEqual(len(forest_runs), 1)
+        self.assertIn(run_id1, forest_runs)
+
+        iris_runs = self.tracker.find_runs({"dataset": "iris"}, exp_id)
+        self.assertEqual(len(iris_runs), 2)
+
+    def test_context_manager(self) -> None:
+        exp_id = self.tracker.create_experiment("context_test")
+
+        with self.tracker.run(exp_id, tags={"model": "test", "version": "1.0"}) as run:
+            run.log_model("test_model", {"param": 1})
+            run.log_predictions([1.0, 2.0], [1.1, 1.9])
+
+        runs = self.tracker.get_run_history(exp_id)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["run_status"], "COMPLETED")
+
+        tags = self.tracker.get_tags("run", runs[0]["run_id"])
+        self.assertEqual(tags["model"], "test")
+        self.assertEqual(tags["version"], "1.0")
+
+    def test_context_manager_failure(self) -> None:
+        exp_id = self.tracker.create_experiment("context_failure_test")
+
+        try:
+            with self.tracker.run(exp_id) as run:
+                run.log_model("test_model", {"param": 1})
+                raise ValueError("Test error")
+        except ValueError:
+            pass
+
+        runs = self.tracker.get_run_history(exp_id)
+        self.assertEqual(len(runs), 1)
+        self.assertEqual(runs[0]["run_status"], "FAILED")
+        self.assertIn("Test error", runs[0]["error"])
+
+    def test_aggregate(self) -> None:
+        exp_id = self.tracker.create_experiment("aggregate_test")
+
+        run_id1 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run_id1, "model_a", {"param": 1})
+        self.tracker.log_metric(run_id1, "accuracy", 0.85)
+        self.tracker.log_tag("run", run_id1, "model", "model_a")
+
+        run_id2 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run_id2, "model_a", {"param": 2})
+        self.tracker.log_metric(run_id2, "accuracy", 0.90)
+        self.tracker.log_tag("run", run_id2, "model", "model_a")
+
+        results = self.tracker.aggregate(exp_id, "accuracy", group_by=["model"])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["model"], "model_a")
+        self.assertAlmostEqual(results[0]["accuracy_mean"], 0.875, places=3)
 
 
 if __name__ == "__main__":

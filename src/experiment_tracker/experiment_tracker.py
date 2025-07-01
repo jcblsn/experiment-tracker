@@ -57,7 +57,7 @@ class RunHandle:
     def log_predictions(
         self,
         predictions: list[float],
-        actual_values: list[float],
+        actual_values: list[float] | None = None,
         index: list[int] | None = None,
         metrics: list[str] | None = None,
         update: bool = True,
@@ -295,20 +295,23 @@ class ExperimentTracker:
         self,
         run_id: int,
         predictions: list[float],
-        actual_values: list[float],
+        actual_values: list[float] | None = None,
         index: list[int] | None = None,
         metrics: list[str] | None = None,
         update: bool = True,
         custom_metrics: dict[str, callable] | None = None,
     ) -> None:
-        if not isinstance(predictions, list) or not isinstance(actual_values, list):
-            raise TypeError("predictions and actual_values must be lists")
-        if len(predictions) != len(actual_values):
-            raise ValueError("predictions and actual_values must have the same length")
+        if not isinstance(predictions, list):
+            raise TypeError("predictions must be a list")
+        if actual_values is not None:
+            if not isinstance(actual_values, list):
+                raise TypeError("actual_values must be a list")
+            if len(predictions) != len(actual_values):
+                raise ValueError(
+                    "predictions and actual_values must have the same length"
+                )
         if index is not None and len(index) != len(predictions):
-            raise ValueError(
-                "index must have the same length as predictions and actual_values"
-            )
+            raise ValueError("index must have the same length as predictions")
 
         cursor = self.conn.cursor()
         cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (run_id,))
@@ -318,25 +321,40 @@ class ExperimentTracker:
         if update:
             cursor.execute("DELETE FROM predictions WHERE run_id = ?", (run_id,))
 
-        if index is None:
-            for pred, actual in zip(predictions, actual_values):
-                cursor.execute(
-                    "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
-                    (run_id, smart_round(pred), smart_round(actual)),
-                )
+        if actual_values is None:
+            if index is None:
+                for pred in predictions:
+                    cursor.execute(
+                        "INSERT INTO predictions (run_id, prediction) VALUES (?, ?)",
+                        (run_id, smart_round(pred)),
+                    )
+            else:
+                for pred, idx in zip(predictions, index):
+                    cursor.execute(
+                        "INSERT INTO predictions (run_id, idx, prediction) VALUES (?, ?, ?)",
+                        (run_id, idx, smart_round(pred)),
+                    )
         else:
-            for pred, actual, idx in zip(predictions, actual_values, index):
-                cursor.execute(
-                    "INSERT INTO predictions (run_id, idx, prediction, actual) VALUES (?, ?, ?, ?)",
-                    (run_id, idx, smart_round(pred), smart_round(actual)),
-                )
+            if index is None:
+                for pred, actual in zip(predictions, actual_values):
+                    cursor.execute(
+                        "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
+                        (run_id, smart_round(pred), smart_round(actual)),
+                    )
+            else:
+                for pred, actual, idx in zip(predictions, actual_values, index):
+                    cursor.execute(
+                        "INSERT INTO predictions (run_id, idx, prediction, actual) VALUES (?, ?, ?, ?)",
+                        (run_id, idx, smart_round(pred), smart_round(actual)),
+                    )
 
-        self._calculate_default_metrics(run_id, predictions, actual_values, metrics)
+        if actual_values is not None:
+            self._calculate_default_metrics(run_id, predictions, actual_values, metrics)
 
-        if custom_metrics:
-            for name, metric_fn in custom_metrics.items():
-                value = metric_fn(predictions, actual_values)
-                self._log_metric(run_id, name, value)
+            if custom_metrics:
+                for name, metric_fn in custom_metrics.items():
+                    value = metric_fn(predictions, actual_values)
+                    self._log_metric(run_id, name, value)
 
         self.conn.commit()
 

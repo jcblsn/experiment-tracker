@@ -855,5 +855,303 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertEqual(all_runs[0]["metrics"], {})
 
 
+class TestBestRun(unittest.TestCase):
+    """Tests for best_run() helper method."""
+
+    def setUp(self) -> None:
+        self.tracker = ExperimentTracker(":memory:")
+
+    def tearDown(self) -> None:
+        self.tracker.conn.close()
+
+    def test_best_run_minimize(self) -> None:
+        """Find run with lowest metric value."""
+        exp_id = self.tracker.create_experiment("best_run_test")
+
+        with self.tracker.run(exp_id, tags={"model": "a"}) as run:
+            run.log_metric("mape", 15.0)
+
+        with self.tracker.run(exp_id, tags={"model": "b"}) as run:
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id, tags={"model": "c"}) as run:
+            run.log_metric("mape", 20.0)
+
+        best = self.tracker.best_run(exp_id, "mape", minimize=True)
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["tags"]["model"], "b")
+        self.assertEqual(best["metrics"]["mape"], 10.0)
+
+    def test_best_run_maximize(self) -> None:
+        """Find run with highest metric value."""
+        exp_id = self.tracker.create_experiment("best_run_max_test")
+
+        with self.tracker.run(exp_id, tags={"model": "a"}) as run:
+            run.log_metric("accuracy", 0.85)
+
+        with self.tracker.run(exp_id, tags={"model": "b"}) as run:
+            run.log_metric("accuracy", 0.95)
+
+        with self.tracker.run(exp_id, tags={"model": "c"}) as run:
+            run.log_metric("accuracy", 0.90)
+
+        best = self.tracker.best_run(exp_id, "accuracy", minimize=False)
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["tags"]["model"], "b")
+        self.assertEqual(best["metrics"]["accuracy"], 0.95)
+
+    def test_best_run_with_tag_filter(self) -> None:
+        """Find best run filtered by tag."""
+        exp_id = self.tracker.create_experiment("best_run_filter_test")
+
+        with self.tracker.run(exp_id, tags={"model": "sarima", "fold": "1"}) as run:
+            run.log_metric("mape", 12.0)
+
+        with self.tracker.run(exp_id, tags={"model": "ridge", "fold": "1"}) as run:
+            run.log_metric("mape", 8.0)
+
+        with self.tracker.run(exp_id, tags={"model": "sarima", "fold": "2"}) as run:
+            run.log_metric("mape", 10.0)
+
+        best = self.tracker.best_run(
+            exp_id, "mape", minimize=True, where_tags={"fold": "1"}
+        )
+
+        self.assertIsNotNone(best)
+        self.assertEqual(best["tags"]["model"], "ridge")
+        self.assertEqual(best["metrics"]["mape"], 8.0)
+
+    def test_best_run_no_runs(self) -> None:
+        """Return None when no runs exist."""
+        exp_id = self.tracker.create_experiment("empty_best_run_test")
+
+        best = self.tracker.best_run(exp_id, "mape")
+
+        self.assertIsNone(best)
+
+    def test_best_run_no_matching_metric(self) -> None:
+        """Return None when no runs have the requested metric."""
+        exp_id = self.tracker.create_experiment("no_metric_test")
+
+        with self.tracker.run(exp_id) as run:
+            run.log_metric("accuracy", 0.9)
+
+        best = self.tracker.best_run(exp_id, "mape")
+
+        self.assertIsNone(best)
+
+
+class TestLatestRuns(unittest.TestCase):
+    """Tests for latest_runs() helper method using timestamps."""
+
+    def setUp(self) -> None:
+        self.tracker = ExperimentTracker(":memory:")
+
+    def tearDown(self) -> None:
+        self.tracker.conn.close()
+
+    def test_latest_runs_default(self) -> None:
+        """Get single most recent run."""
+        exp_id = self.tracker.create_experiment("latest_runs_test")
+
+        with self.tracker.run(exp_id, tags={"order": "1"}) as run:
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id, tags={"order": "2"}) as run:
+            run.log_metric("mape", 12.0)
+
+        with self.tracker.run(exp_id, tags={"order": "3"}) as run:
+            run.log_metric("mape", 8.0)
+
+        latest = self.tracker.latest_runs(exp_id)
+
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]["tags"]["order"], "3")
+
+    def test_latest_runs_n(self) -> None:
+        """Get n most recent runs."""
+        exp_id = self.tracker.create_experiment("latest_n_test")
+
+        for i in range(5):
+            with self.tracker.run(exp_id, tags={"order": str(i)}) as run:
+                run.log_metric("mape", float(i))
+
+        latest = self.tracker.latest_runs(exp_id, n=3)
+
+        self.assertEqual(len(latest), 3)
+        orders = [r["tags"]["order"] for r in latest]
+        self.assertEqual(orders, ["4", "3", "2"])
+
+    def test_latest_runs_since_timestamp(self) -> None:
+        """Get runs started after a specific timestamp."""
+        exp_id = self.tracker.create_experiment("latest_since_test")
+
+        with self.tracker.run(exp_id, tags={"order": "1"}) as run:
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id, tags={"order": "2"}) as run:
+            run.log_metric("mape", 12.0)
+
+        # Use a timestamp in the past to get all runs
+        cutoff_time = "2000-01-01 00:00:00"
+
+        with self.tracker.run(exp_id, tags={"order": "3"}) as run:
+            run.log_metric("mape", 8.0)
+
+        with self.tracker.run(exp_id, tags={"order": "4"}) as run:
+            run.log_metric("mape", 9.0)
+
+        latest = self.tracker.latest_runs(exp_id, since=cutoff_time)
+
+        # All 4 runs should be after year 2000
+        self.assertEqual(len(latest), 4)
+
+        # Test with future timestamp returns empty
+        future_time = "2099-01-01 00:00:00"
+        latest_future = self.tracker.latest_runs(exp_id, since=future_time)
+        self.assertEqual(len(latest_future), 0)
+
+    def test_latest_runs_after_run_id(self) -> None:
+        """Get runs started after a specific run."""
+        exp_id = self.tracker.create_experiment("latest_after_test")
+
+        with self.tracker.run(exp_id, tags={"order": "1"}) as run:
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id, tags={"order": "2"}) as run:
+            run.log_metric("mape", 12.0)
+            cutoff_run_id = run.run_id
+
+        with self.tracker.run(exp_id, tags={"order": "3"}) as run:
+            run.log_metric("mape", 8.0)
+
+        with self.tracker.run(exp_id, tags={"order": "4"}) as run:
+            run.log_metric("mape", 9.0)
+
+        latest = self.tracker.latest_runs(exp_id, after_run=cutoff_run_id)
+
+        self.assertEqual(len(latest), 2)
+        orders = {r["tags"]["order"] for r in latest}
+        self.assertEqual(orders, {"3", "4"})
+
+    def test_latest_runs_empty(self) -> None:
+        """Return empty list when no runs exist."""
+        exp_id = self.tracker.create_experiment("empty_latest_test")
+
+        latest = self.tracker.latest_runs(exp_id)
+
+        self.assertEqual(latest, [])
+
+
+class TestAggregateByParams(unittest.TestCase):
+    """Tests for parameter-aware aggregate grouping."""
+
+    def setUp(self) -> None:
+        self.tracker = ExperimentTracker(":memory:")
+
+    def tearDown(self) -> None:
+        self.tracker.conn.close()
+
+    def test_aggregate_group_by_params(self) -> None:
+        """Group aggregation by model parameters."""
+        exp_id = self.tracker.create_experiment("param_aggregate_test")
+
+        with self.tracker.run(exp_id, tags={"fold": "1"}) as run:
+            run.log_model("sarima", {"order": "(0,1,1)", "seasonal": True})
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id, tags={"fold": "2"}) as run:
+            run.log_model("sarima", {"order": "(0,1,1)", "seasonal": True})
+            run.log_metric("mape", 12.0)
+
+        with self.tracker.run(exp_id, tags={"fold": "1"}) as run:
+            run.log_model("sarima", {"order": "(1,1,1)", "seasonal": True})
+            run.log_metric("mape", 8.0)
+
+        with self.tracker.run(exp_id, tags={"fold": "2"}) as run:
+            run.log_model("sarima", {"order": "(1,1,1)", "seasonal": True})
+            run.log_metric("mape", 9.0)
+
+        results = self.tracker.aggregate(
+            exp_id,
+            "mape",
+            group_by_params=["order"],
+            aggregations=["mean", "count"],
+        )
+
+        self.assertEqual(len(results), 2)
+
+        order_011 = next(r for r in results if r["order"] == "(0,1,1)")
+        order_111 = next(r for r in results if r["order"] == "(1,1,1)")
+
+        self.assertAlmostEqual(order_011["mape_mean"], 11.0, places=2)
+        self.assertEqual(order_011["mape_count"], 2)
+
+        self.assertAlmostEqual(order_111["mape_mean"], 8.5, places=2)
+        self.assertEqual(order_111["mape_count"], 2)
+
+    def test_aggregate_group_by_tags_and_params(self) -> None:
+        """Group by both tags and parameters."""
+        exp_id = self.tracker.create_experiment("mixed_aggregate_test")
+
+        with self.tracker.run(exp_id, tags={"dataset": "train"}) as run:
+            run.log_model("ridge", {"alpha": 0.1})
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id, tags={"dataset": "train"}) as run:
+            run.log_model("ridge", {"alpha": 1.0})
+            run.log_metric("mape", 12.0)
+
+        with self.tracker.run(exp_id, tags={"dataset": "test"}) as run:
+            run.log_model("ridge", {"alpha": 0.1})
+            run.log_metric("mape", 15.0)
+
+        with self.tracker.run(exp_id, tags={"dataset": "test"}) as run:
+            run.log_model("ridge", {"alpha": 1.0})
+            run.log_metric("mape", 14.0)
+
+        results = self.tracker.aggregate(
+            exp_id,
+            "mape",
+            group_by=["dataset"],
+            group_by_params=["alpha"],
+            aggregations=["mean"],
+        )
+
+        self.assertEqual(len(results), 4)
+
+        train_01 = next(
+            r for r in results if r["dataset"] == "train" and r["alpha"] == 0.1
+        )
+        self.assertAlmostEqual(train_01["mape_mean"], 10.0, places=2)
+
+    def test_aggregate_nested_param(self) -> None:
+        """Group by nested parameter using dot notation."""
+        exp_id = self.tracker.create_experiment("nested_param_test")
+
+        with self.tracker.run(exp_id) as run:
+            run.log_model("lgbm", {"hyperparams": {"n_estimators": 100}})
+            run.log_metric("mape", 10.0)
+
+        with self.tracker.run(exp_id) as run:
+            run.log_model("lgbm", {"hyperparams": {"n_estimators": 100}})
+            run.log_metric("mape", 12.0)
+
+        with self.tracker.run(exp_id) as run:
+            run.log_model("lgbm", {"hyperparams": {"n_estimators": 200}})
+            run.log_metric("mape", 8.0)
+
+        results = self.tracker.aggregate(
+            exp_id,
+            "mape",
+            group_by_params=["hyperparams.n_estimators"],
+            aggregations=["mean"],
+        )
+
+        self.assertEqual(len(results), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

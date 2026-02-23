@@ -607,6 +607,7 @@ class ExperimentTracker:
         experiment_id: int,
         metric: str,
         group_by: list[str] | None = None,
+        group_by_params: list[str] | None = None,
         where_tags: dict[str, str] | None = None,
         aggregations: list[str] | None = None,
     ) -> list[dict]:
@@ -629,30 +630,43 @@ class ExperimentTracker:
             if agg_name in agg_funcs:
                 select_parts.append(f"{agg_funcs[agg_name]} as {metric}_{agg_name}")
 
-        base_query = f"""
-            SELECT {', '.join(select_parts)}
-            FROM metrics m
-            JOIN runs r ON m.run_id = r.run_id
-        """
+        group_select = []
+        group_by_cols = []
+        joins = []
+        need_models_join = False
 
         if group_by:
-            group_select = []
             for col in group_by:
                 if col == "model":
-                    base_query += " JOIN models mo ON r.run_id = mo.run_id"
+                    need_models_join = True
                     group_select.append("mo.model_name as model")
+                    group_by_cols.append("mo.model_name")
                 else:
                     group_select.append(f"t_{col}.tag_value as {col}")
-                    base_query += f" JOIN tags t_{col} ON t_{col}.entity_type = 'run' AND t_{col}.entity_id = r.run_id AND t_{col}.tag_name = '{col}'"
+                    group_by_cols.append(f"t_{col}.tag_value")
+                    joins.append(
+                        f"JOIN tags t_{col} ON t_{col}.entity_type = 'run' "
+                        f"AND t_{col}.entity_id = r.run_id AND t_{col}.tag_name = '{col}'"
+                    )
 
-            select_parts = group_select + select_parts
-            base_query = f"SELECT {', '.join(select_parts)} FROM metrics m JOIN runs r ON m.run_id = r.run_id"
+        if group_by_params:
+            need_models_join = True
+            for param in group_by_params:
+                json_path = "$." + param.replace(".", ".")
+                col_alias = param.split(".")[-1]
+                group_select.append(
+                    f"json_extract(mo.parameters, '{json_path}') as \"{col_alias}\""
+                )
+                group_by_cols.append(f"json_extract(mo.parameters, '{json_path}')")
 
-            for col in group_by:
-                if col == "model":
-                    base_query += " JOIN models mo ON r.run_id = mo.run_id"
-                else:
-                    base_query += f" JOIN tags t_{col} ON t_{col}.entity_type = 'run' AND t_{col}.entity_id = r.run_id AND t_{col}.tag_name = '{col}'"
+        if need_models_join:
+            joins.insert(0, "JOIN models mo ON r.run_id = mo.run_id")
+
+        all_select = group_select + select_parts
+        base_query = f"SELECT {', '.join(all_select)} FROM metrics m JOIN runs r ON m.run_id = r.run_id"
+
+        for join in joins:
+            base_query += " " + join
 
         conditions = [f"r.experiment_id = {experiment_id}", f"m.metric = '{metric}'"]
 
@@ -665,8 +679,8 @@ class ExperimentTracker:
 
         query = base_query + " WHERE " + " AND ".join(conditions)
 
-        if group_by:
-            query += f" GROUP BY {', '.join(group_by)}"
+        if group_by_cols:
+            query += f" GROUP BY {', '.join(group_by_cols)}"
 
         cursor.execute(query)
         rows = cursor.fetchall()
@@ -982,3 +996,102 @@ class ExperimentTracker:
             "DELETE FROM experiments WHERE experiment_id = ?", (experiment_id,)
         )
         self.conn.commit()
+
+    def best_run(
+        self,
+        experiment_id: int,
+        metric: str,
+        minimize: bool = True,
+        where_tags: dict[str, str] | None = None,
+    ) -> dict | None:
+        """Find the best performing run by a given metric.
+
+        Args:
+            experiment_id: The experiment to search within.
+            metric: The metric name to optimize.
+            minimize: If True, find lowest value; if False, find highest.
+            where_tags: Optional tag filters to apply.
+
+        Returns:
+            Full run data dict for the best run, or None if no matching runs.
+        """
+        cursor = self.conn.cursor()
+
+        query = """
+            SELECT r.run_id, m.metric_value
+            FROM runs r
+            JOIN metrics m ON r.run_id = m.run_id
+            WHERE r.experiment_id = ? AND m.metric = ?
+        """
+        params: list = [experiment_id, metric]
+
+        if where_tags:
+            for tag_name, tag_value in where_tags.items():
+                query += f"""
+                    AND r.run_id IN (
+                        SELECT entity_id FROM tags
+                        WHERE entity_type = 'run'
+                        AND tag_name = ? AND tag_value = ?
+                    )
+                """
+                params.extend([tag_name, tag_value])
+
+        order = "ASC" if minimize else "DESC"
+        query += f" ORDER BY m.metric_value {order} LIMIT 1"
+
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+
+        if row is None:
+            return None
+
+        run_id = row[0]
+        all_runs = self.get_all_runs(experiment_id)
+        return next((r for r in all_runs if r["run_id"] == run_id), None)
+
+    def latest_runs(
+        self,
+        experiment_id: int,
+        n: int = 1,
+        since: str | None = None,
+        after_run: int | None = None,
+    ) -> list[dict]:
+        """Get the most recent runs from an experiment.
+
+        Args:
+            experiment_id: The experiment to query.
+            n: Maximum number of runs to return (default 1).
+            since: ISO timestamp string; only return runs started after this time.
+            after_run: Run ID; only return runs started after this run.
+
+        Returns:
+            List of run data dicts, ordered by start time descending (most recent first).
+        """
+        cursor = self.conn.cursor()
+
+        query = """
+            SELECT run_id FROM runs
+            WHERE experiment_id = ?
+        """
+        params: list = [experiment_id]
+
+        if after_run is not None:
+            query += " AND run_id > ?"
+            params.append(after_run)
+        elif since is not None:
+            query += " AND run_start_time > ?"
+            params.append(since)
+
+        query += " ORDER BY run_id DESC"
+
+        if after_run is None and since is None:
+            query += " LIMIT ?"
+            params.append(n)
+
+        cursor.execute(query, params)
+        run_ids = [row[0] for row in cursor.fetchall()]
+
+        all_runs = self.get_all_runs(experiment_id)
+        run_map = {r["run_id"]: r for r in all_runs}
+
+        return [run_map[rid] for rid in run_ids if rid in run_map]

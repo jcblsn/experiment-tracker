@@ -1,3 +1,3 @@
-from .experiment_tracker import ExperimentTracker
+from .experiment_tracker import ExperimentTracker, RunHandle
 
-__all__ = ["ExperimentTracker"]
+__all__ = ["ExperimentTracker", "RunHandle"]

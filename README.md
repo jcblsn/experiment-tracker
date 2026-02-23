@@ -50,6 +50,23 @@ run_ids = tracker.find_runs({"model": "ols"}, exp_id)
 results = tracker.aggregate(exp_id, "rmse", group_by=["model"])
 ```
 
+## CLI
+
+A read-only CLI is available for querying experiments:
+
+```bash
+expt list                        # List experiments
+expt show <id>                   # Show experiment details
+expt runs <id>                   # List runs for an experiment
+expt metrics <run_id>            # Show metrics for a run
+expt best <id> --metric <name>   # Find best run by metric
+expt compare <id1> <id2>         # Compare runs side-by-side
+expt sql "SELECT ..."            # Run arbitrary SQL
+expt export <id> <dir>           # Export to CSV
+```
+
+Run `expt --help` for full options.
+
 ## Schema
 
 - experiments: experiment_id, experiment_name, experiment_description, created_time

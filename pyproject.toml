@@ -9,6 +9,9 @@ authors = [
 requires-python = ">=3.12"
 dependencies = []
 
+[project.scripts]
+expt = "experiment_tracker.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

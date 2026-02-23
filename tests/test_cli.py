@@ -154,6 +154,76 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(data["run_id"], self.run_id2)
         self.assertEqual(data["accuracy"], 0.90)
 
+    def test_best_with_tag_filter(self):
+        result = self.run_cli(
+            "best", str(self.exp_id), "--metric", "accuracy", "--tag", "model=model_a"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(str(self.run_id1), result.stdout)
+        self.assertIn("0.85", result.stdout)
+
+    def test_aggregate_basic(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "accuracy"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("accuracy_mean", result.stdout)
+        self.assertIn("accuracy_std", result.stdout)
+        self.assertIn("accuracy_count", result.stdout)
+
+    def test_aggregate_group_by_tag(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "accuracy", "--group-by", "model"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("model_a", result.stdout)
+        self.assertIn("model_b", result.stdout)
+
+    def test_aggregate_group_by_param(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "accuracy", "--group-by-param", "lr"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("0.01", result.stdout)
+        self.assertIn("0.001", result.stdout)
+
+    def test_aggregate_custom_agg(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "accuracy",
+            "--agg", "min", "--agg", "max"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("accuracy_min", result.stdout)
+        self.assertIn("accuracy_max", result.stdout)
+        self.assertNotIn("accuracy_mean", result.stdout)
+
+    def test_aggregate_json(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "accuracy",
+            "--group-by", "model", "--format", "json"
+        )
+        self.assertEqual(result.returncode, 0)
+        data = json.loads(result.stdout)
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 2)
+        self.assertIn("model", data[0])
+        self.assertIn("accuracy_mean", data[0])
+
+    def test_aggregate_with_tag_filter(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "accuracy",
+            "--tag", "fold=0"
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("1", result.stdout)
+
+    def test_aggregate_nonexistent_metric(self):
+        result = self.run_cli(
+            "aggregate", str(self.exp_id), "--metric", "nonexistent"
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Error", result.stderr)
+
     def test_compare(self):
         result = self.run_cli("compare", str(self.run_id1), str(self.run_id2))
         self.assertEqual(result.returncode, 0)

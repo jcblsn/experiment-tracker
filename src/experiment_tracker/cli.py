@@ -227,32 +227,31 @@ def cmd_best(args):
     exp = tracker.get_experiment(args.experiment_id)
     if exp is None:
         sys.exit(f"Error: Experiment {args.experiment_id} not found.")
-    cursor = tracker.conn.cursor()
-    order = "ASC" if args.minimize else "DESC"
-    cursor.execute(
-        f"""
-        SELECT r.run_id, m.metric_value
-        FROM runs r
-        JOIN metrics m ON r.run_id = m.run_id
-        WHERE r.experiment_id = ? AND m.metric = ? AND r.run_status = 'COMPLETED'
-        ORDER BY m.metric_value {order}
-        LIMIT 1
-        """,
-        (args.experiment_id, args.metric),
+    tag_filters = {}
+    if args.tag:
+        for t in args.tag:
+            if "=" in t:
+                key, val = t.split("=", 1)
+                tag_filters[key] = val
+            else:
+                tag_filters[t] = ""
+    best = tracker.best_run(
+        args.experiment_id,
+        args.metric,
+        minimize=args.minimize,
+        where_tags=tag_filters if tag_filters else None,
     )
-    row = cursor.fetchone()
-    if row is None:
-        sys.exit(f"Error: No completed runs with metric '{args.metric}' found.")
-    run_id, metric_value = row
-    model = tracker.get_model(run_id)
-    tags = tracker.get_tags("run", run_id)
-    all_metrics = tracker._get_metrics_safe(run_id)
+    if best is None:
+        sys.exit(f"Error: No runs with metric '{args.metric}' found.")
+    model = best.get("model")
+    tags = best.get("tags", {})
+    metrics = best.get("metrics", {})
     output = {
-        "run_id": run_id,
+        "run_id": best["run_id"],
         "model": model["model_name"] if model else None,
         "parameters": model["parameters"] if model else None,
-        args.metric: metric_value,
-        "all_metrics": all_metrics,
+        args.metric: metrics.get(args.metric),
+        "all_metrics": metrics,
         "tags": tags,
     }
     if args.format == "json":
@@ -260,12 +259,42 @@ def cmd_best(args):
     else:
         print(f"Best run by {args.metric} ({'min' if args.minimize else 'max'}):")
         print()
-        print(f"Run ID: {run_id}")
+        print(f"Run ID: {best['run_id']}")
         if model:
             print(f"Model: {model['model_name']}")
-        print(f"{args.metric}: {metric_value}")
+        print(f"{args.metric}: {metrics.get(args.metric)}")
         if tags:
             print(f"Tags: {', '.join(f'{k}={v}' for k, v in tags.items())}")
+
+
+def cmd_aggregate(args):
+    tracker = ExperimentTracker(find_database(args.db))
+    exp = tracker.get_experiment(args.experiment_id)
+    if exp is None:
+        sys.exit(f"Error: Experiment {args.experiment_id} not found.")
+    tag_filters = {}
+    if args.tag:
+        for t in args.tag:
+            if "=" in t:
+                key, val = t.split("=", 1)
+                tag_filters[key] = val
+            else:
+                tag_filters[t] = ""
+    group_by = args.group_by if args.group_by else None
+    group_by_params = args.group_by_param if args.group_by_param else None
+    aggregations = args.agg if args.agg else None
+    results = tracker.aggregate(
+        args.experiment_id,
+        args.metric,
+        group_by=group_by,
+        group_by_params=group_by_params,
+        where_tags=tag_filters if tag_filters else None,
+        aggregations=aggregations,
+    )
+    count_key = f"{args.metric}_count"
+    if not results or (len(results) == 1 and results[0].get(count_key) == 0):
+        sys.exit(f"Error: No runs with metric '{args.metric}' found.")
+    print(format_output(results, args.format))
 
 
 def cmd_compare(args):
@@ -394,9 +423,34 @@ def main():
         "--minimize", action="store_true", help="Minimize instead of maximize"
     )
     best_parser.add_argument(
+        "--tag", "-t", action="append", help="Filter by tag (KEY=VALUE)"
+    )
+    best_parser.add_argument(
         "--format", "-f", choices=["table", "json"], default="table"
     )
     best_parser.set_defaults(func=cmd_best)
+
+    agg_parser = subparsers.add_parser("aggregate", help="Aggregate metrics across runs")
+    agg_parser.add_argument("experiment_id", type=int, help="Experiment ID")
+    agg_parser.add_argument("--metric", "-m", required=True, help="Metric to aggregate")
+    agg_parser.add_argument(
+        "--group-by", "-g", action="append", help="Group by tag name"
+    )
+    agg_parser.add_argument(
+        "--group-by-param", "-p", action="append", help="Group by model parameter (e.g., 'degree')"
+    )
+    agg_parser.add_argument(
+        "--tag", "-t", action="append", help="Filter by tag (KEY=VALUE)"
+    )
+    agg_parser.add_argument(
+        "--agg", "-a", action="append",
+        choices=["mean", "std", "count", "min", "max", "sum"],
+        help="Aggregation functions (default: mean, std, count)"
+    )
+    agg_parser.add_argument(
+        "--format", "-f", choices=["table", "json", "csv"], default="table"
+    )
+    agg_parser.set_defaults(func=cmd_aggregate)
 
     compare_parser = subparsers.add_parser("compare", help="Compare runs side-by-side")
     compare_parser.add_argument("run_ids", type=int, nargs="+", help="Run IDs to compare")

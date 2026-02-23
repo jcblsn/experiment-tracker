@@ -79,6 +79,9 @@ class RunHandle:
     def log_metric(self, metric_name: str, value: float) -> None:
         self.tracker.log_metric(self.run_id, metric_name, value)
 
+    def log_metrics(self, metrics: dict[str, float]) -> None:
+        self.tracker.log_metrics(self.run_id, metrics)
+
     def log_tag(self, tag_name: str, tag_value: str = "") -> int:
         return self.tracker.log_tag("run", self.run_id, tag_name, tag_value)
 
@@ -430,6 +433,33 @@ class ExperimentTracker:
         columns = [col[0] for col in cursor.description]
         return [dict(zip(columns, row)) for row in rows]
 
+    def get_all_runs(self, experiment_id: int) -> list[dict]:
+        runs = self.get_run_history(experiment_id)
+        result = []
+        for run in runs:
+            run_id = run["run_id"]
+            run_data = {
+                "run_id": run_id,
+                "experiment_id": run["experiment_id"],
+                "run_status": run["run_status"],
+                "run_start_time": run["run_start_time"],
+                "run_end_time": run["run_end_time"],
+                "error": run["error"],
+                "model": self.get_model(run_id),
+                "tags": self.get_tags("run", run_id),
+                "metrics": self._get_metrics_safe(run_id),
+            }
+            result.append(run_data)
+        return result
+
+    def _get_metrics_safe(self, run_id: int) -> dict:
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT metric, metric_value FROM metrics WHERE run_id = ?", (run_id,)
+        )
+        rows = cursor.fetchall()
+        return {name: value for name, value in rows}
+
     def get_model(self, run_id: int) -> dict | None:
         cursor = self.conn.cursor()
         cursor.execute(
@@ -462,6 +492,11 @@ class ExperimentTracker:
 
     def log_metric(self, run_id: int, metric_name: str, value: float) -> None:
         self._log_metric(run_id, metric_name, value)
+        self.conn.commit()
+
+    def log_metrics(self, run_id: int, metrics: dict[str, float]) -> None:
+        for name, value in metrics.items():
+            self._log_metric(run_id, name, value)
         self.conn.commit()
 
     def get_metrics(self, run_id: int) -> dict:

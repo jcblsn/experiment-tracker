@@ -20,7 +20,7 @@ packages = ["src/experiment_tracker"]
 dev = [
     "ipykernel>=6.29.5",
     "matplotlib>=3.10.0",
-    "numpy>=2.2.3",
+    "numpy>=2.2.3"
 ]
 
 [tool.hatch.build]

@@ -759,5 +759,101 @@ class TestExperimentTracker(unittest.TestCase):
         self.assertAlmostEqual(results[0]["accuracy_mean"], 0.875, places=3)
 
 
+    def test_log_metrics_batch(self) -> None:
+        exp_id = self.tracker.create_experiment("batch_metrics_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        metrics_dict = {
+            "mape_h1": 0.05,
+            "mape_h2": 0.08,
+            "mape_h3": 0.12,
+            "mape_h4": 0.15,
+        }
+        self.tracker.log_metrics(run_id, metrics_dict)
+
+        stored_metrics = self.tracker.get_metrics(run_id)
+        for name, value in metrics_dict.items():
+            self.assertIn(name, stored_metrics)
+            self.assertAlmostEqual(stored_metrics[name], value, places=5)
+
+    def test_log_metrics_batch_via_run_handle(self) -> None:
+        exp_id = self.tracker.create_experiment("batch_metrics_handle_test")
+
+        with self.tracker.run(exp_id) as run:
+            run.log_metrics({"accuracy": 0.95, "f1": 0.92, "precision": 0.94})
+
+        runs = self.tracker.get_run_history(exp_id)
+        metrics = self.tracker.get_metrics(runs[0]["run_id"])
+        self.assertEqual(metrics["accuracy"], 0.95)
+        self.assertEqual(metrics["f1"], 0.92)
+        self.assertEqual(metrics["precision"], 0.94)
+
+    def test_log_metrics_batch_updates_existing(self) -> None:
+        exp_id = self.tracker.create_experiment("batch_update_test")
+        run_id = self.tracker.start_run(exp_id)
+
+        self.tracker.log_metric(run_id, "accuracy", 0.80)
+        self.tracker.log_metrics(run_id, {"accuracy": 0.90, "f1": 0.85})
+
+        metrics = self.tracker.get_metrics(run_id)
+        self.assertEqual(metrics["accuracy"], 0.90)
+        self.assertEqual(metrics["f1"], 0.85)
+
+    def test_get_all_runs(self) -> None:
+        exp_id = self.tracker.create_experiment("get_all_runs_test")
+
+        run_id1 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run_id1, "model_a", {"lr": 0.01})
+        self.tracker.log_tag("run", run_id1, "fold", "0")
+        self.tracker.log_metric(run_id1, "accuracy", 0.85)
+        self.tracker.log_predictions(run_id1, [1.0, 2.0], [1.1, 1.9])
+        self.tracker.end_run(run_id1)
+
+        run_id2 = self.tracker.start_run(exp_id)
+        self.tracker.log_model(run_id2, "model_b", {"lr": 0.001})
+        self.tracker.log_tag("run", run_id2, "fold", "1")
+        self.tracker.log_metric(run_id2, "accuracy", 0.90)
+        self.tracker.end_run(run_id2)
+
+        all_runs = self.tracker.get_all_runs(exp_id)
+
+        self.assertEqual(len(all_runs), 2)
+
+        for run in all_runs:
+            self.assertIn("run_id", run)
+            self.assertIn("run_status", run)
+            self.assertIn("model", run)
+            self.assertIn("tags", run)
+            self.assertIn("metrics", run)
+
+        run1_data = next(r for r in all_runs if r["run_id"] == run_id1)
+        self.assertEqual(run1_data["model"]["model_name"], "model_a")
+        self.assertEqual(run1_data["tags"]["fold"], "0")
+        self.assertEqual(run1_data["metrics"]["accuracy"], 0.85)
+
+        run2_data = next(r for r in all_runs if r["run_id"] == run_id2)
+        self.assertEqual(run2_data["model"]["model_name"], "model_b")
+        self.assertEqual(run2_data["tags"]["fold"], "1")
+        self.assertEqual(run2_data["metrics"]["accuracy"], 0.90)
+
+    def test_get_all_runs_empty_experiment(self) -> None:
+        exp_id = self.tracker.create_experiment("empty_experiment")
+        all_runs = self.tracker.get_all_runs(exp_id)
+        self.assertEqual(all_runs, [])
+
+    def test_get_all_runs_partial_data(self) -> None:
+        exp_id = self.tracker.create_experiment("partial_data_test")
+
+        run_id = self.tracker.start_run(exp_id)
+        self.tracker.end_run(run_id)
+
+        all_runs = self.tracker.get_all_runs(exp_id)
+
+        self.assertEqual(len(all_runs), 1)
+        self.assertIsNone(all_runs[0]["model"])
+        self.assertEqual(all_runs[0]["tags"], {})
+        self.assertEqual(all_runs[0]["metrics"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

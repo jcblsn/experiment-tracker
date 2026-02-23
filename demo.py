@@ -1,109 +1,55 @@
-import os
-import shutil
-import tempfile
-import pickle
-
-
 from src.experiment_tracker.experiment_tracker import ExperimentTracker
 
 
 def main() -> None:
-    tracker = ExperimentTracker("experiments.db")
-    print("Initialized experiment tracker with database: experiments.db")
+    tracker = ExperimentTracker(":memory:")
 
     exp_id = tracker.create_experiment(
-        experiment_name="Main Experiment",
-        experiment_description="Demonstration of experiment tracker integration",
+        "Model Comparison",
+        "Comparing linear vs polynomial regression on synthetic data",
     )
-    tracker.log_tag("experiment", exp_id, "demo", "true")
-    tracker.log_tag("experiment", exp_id, "purpose", "demonstration")
-    print(f"Created experiment with ID: {exp_id}")
+    print(f"Created experiment: {exp_id}")
 
-    with tracker.run(exp_id, tags={"model": "ols", "dataset": "demo"}) as run:
-        model_params = {"intercept": True, "normalize": False}
-        run.log_model(model_name="OLS", parameters=model_params)
-        print(f"\nLogged model 'OLS' with parameters: {model_params}")
+    models = {
+        "linear": {
+            "params": {"degree": 1, "regularization": 0.01},
+            "predictions": [1.2, 2.1, 3.0, 4.2],
+            "actuals": [1.0, 2.0, 3.0, 4.0],
+        },
+        "quadratic": {
+            "params": {"degree": 2, "regularization": 0.001},
+            "predictions": [1.05, 1.98, 3.02, 3.95],
+            "actuals": [1.0, 2.0, 3.0, 4.0],
+        },
+        "cubic": {
+            "params": {"degree": 3, "regularization": 0.0001},
+            "predictions": [0.99, 2.01, 2.98, 4.02],
+            "actuals": [1.0, 2.0, 3.0, 4.0],
+        },
+    }
 
-        def max_error(preds, actuals):
-            return max(abs(p - a) for p, a in zip(preds, actuals))
+    print("\nRunning models...")
+    for name, data in models.items():
+        with tracker.run(exp_id, tags={"model_type": name}) as run:
+            run.log_model(name, data["params"])
+            run.log_predictions(data["predictions"], data["actuals"])
+        print(f"  {name}: logged predictions and metrics")
 
-        preds = [0.125, 0.372, 0.933]
-        actuals = [0.15, 0.25, 0.35]
-        run.log_predictions(
-            predictions=preds,
-            actual_values=actuals,
-            custom_metrics={"max_error": max_error},
-        )
+    print("\n--- Results ---")
 
-        model_data = {"coefficients": [1.2, -0.5, 2.1], "intercept": 0.1}
-        artifact_id = run.log_artifact(
-            data=pickle.dumps(model_data),
-            artifact_type="model",
-            filename="ols_model.pkl",
-        )
-        print(f"Logged artifact with ID: {artifact_id}")
+    linear_runs = tracker.find_runs({"model_type": "linear"}, exp_id)
+    print(f"\nLinear model runs: {linear_runs}")
 
-    print("Run completed")
+    metrics = tracker.get_metrics(linear_runs[0])
+    print(f"Linear model metrics: {metrics}")
 
-    found_runs = tracker.find_runs({"model": "ols"}, exp_id)
-    print(f"Found runs: {found_runs}")
+    print("\nModel comparison (RMSE):")
+    results = tracker.aggregate(exp_id, "rmse", group_by=["model_type"])
+    for row in results:
+        print(f"  {row['model_type']}: {row['rmse_mean']:.4f}")
 
-    run_id = found_runs[0]
-    print(f"Metrics for run {run_id}: {tracker.get_metrics(run_id)}")
-
-    tracker.log_tag("experiment", exp_id, "project", "demo")
-    tracker.log_tag("experiment", exp_id, "version", "1.0")
-    tracker.log_tag("run", run_id, "model_type", "simple")
-    tracker.log_tag("run", run_id, "dataset", "synthetic")
-
-    print("\nChecking experiment and run tags:")
-    print(f" Experiment tags: {tracker.get_tags('experiment', exp_id)}")
-    print(f" Run tags: {tracker.get_tags('run', run_id)}")
-
-    print("\nListing recent experiments:")
-    experiments = tracker.list_experiments(limit=5)
-    for exp in experiments:
-        print(
-            f" {exp['experiment_id']}: {exp['experiment_name']} ({exp['created_time']})"
-        )
-
-    print("\nSearching for experiments containing 'Main':")
-    found_experiments = tracker.find_experiments("Main")
-    for exp in found_experiments[:5]:
-        print(
-            f" {exp['experiment_id']}: {exp['experiment_name']} ({exp['created_time']})"
-        )
-    if len(found_experiments) > 5:
-        print(f" ...\n and {len(found_experiments) - 5} other(s)")
-
-    export_dir = tempfile.mkdtemp()
-    print(f"\nCreated temporary directory for export: {export_dir}")
-
-    try:
-        exp_export_dir = tracker.export_experiment(exp_id, export_dir)
-        print(f"\nExported experiment to: {exp_export_dir}")
-
-        new_db_path = "imported_experiments.db"
-        if os.path.exists(new_db_path):
-            os.remove(new_db_path)
-            print(f"Removed existing database: {new_db_path}")
-
-        new_tracker = ExperimentTracker(new_db_path)
-        print(f"Created new tracker with database: {new_db_path}")
-
-        new_exp_id = new_tracker.import_experiment(exp_export_dir)
-        print(f"\nImported experiment with ID: {new_exp_id}")
-
-        metrics = new_tracker.get_metrics(
-            new_tracker.get_run_history(new_exp_id)[0]["run_id"]
-        )
-        print(f"\nMetrics from imported run: {metrics}")
-
-        new_tracker.conn.close()
-        tracker.conn.close()
-    finally:
-        shutil.rmtree(export_dir)
-        print(f"\nCleaned up temporary directory: {export_dir}")
+    best = tracker.best_run(exp_id, "rmse", minimize=True)
+    print(f"\nBest model: {best['tags']['model_type']} (RMSE={best['metrics']['rmse']:.4f})")
 
 
 if __name__ == "__main__":

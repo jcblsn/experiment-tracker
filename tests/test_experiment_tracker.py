@@ -96,9 +96,7 @@ class TestExperiments(TrackerTestCase):
         self.assertEqual("gsl-cv", record["argv"])
 
     def test_partial_provenance_keeps_the_captured_rest(self) -> None:
-        experiment_id = self.tracker.experiment(
-            "imported", provenance={"git_commit": "4b86efd0"}
-        )
+        experiment_id = self.tracker.experiment("imported", provenance={"git_commit": "4b86efd0"})
         record = self.tracker.get_experiment(experiment_id)
         self.assertEqual("4b86efd0", record["git_commit"])
         self.assertTrue(record["python"])

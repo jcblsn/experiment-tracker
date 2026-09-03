@@ -1,1097 +1,945 @@
-import csv
 import json
-import math
 import os
 import sqlite3
-from datetime import datetime
+import subprocess
+import sys
+from collections.abc import Iterable, Mapping, Sequence
+from datetime import date, datetime
 from enum import Enum
-from typing import Any, Callable, Union
+from typing import Any, Self
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS experiments (
+    experiment_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    note TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    git_commit TEXT,
+    git_dirty INTEGER,
+    argv TEXT,
+    python TEXT
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    run_id INTEGER PRIMARY KEY,
+    experiment_id INTEGER NOT NULL REFERENCES experiments(experiment_id) ON DELETE CASCADE,
+    name TEXT,
+    params TEXT,
+    status TEXT NOT NULL CHECK(status IN ('running', 'completed', 'failed')),
+    note TEXT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS metrics (
+    run_id INTEGER NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    metric TEXT NOT NULL,
+    dims TEXT NOT NULL DEFAULT '{}',
+    value REAL NOT NULL,
+    UNIQUE(run_id, metric, dims)
+);
+
+CREATE TABLE IF NOT EXISTS predictions (
+    prediction_id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    dims TEXT NOT NULL DEFAULT '{}',
+    prediction REAL,
+    actual REAL
+);
+
+CREATE TABLE IF NOT EXISTS tags (
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('experiment', 'run')),
+    entity_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    value TEXT NOT NULL DEFAULT '',
+    UNIQUE(entity_type, entity_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS artifacts (
+    artifact_id INTEGER PRIMARY KEY,
+    experiment_id INTEGER REFERENCES experiments(experiment_id) ON DELETE CASCADE,
+    run_id INTEGER REFERENCES runs(run_id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    data BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS runs_experiment ON runs(experiment_id);
+CREATE INDEX IF NOT EXISTS metrics_run ON metrics(run_id);
+CREATE INDEX IF NOT EXISTS predictions_run ON predictions(run_id);
+CREATE INDEX IF NOT EXISTS tags_entity ON tags(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS artifacts_run ON artifacts(run_id);
+CREATE INDEX IF NOT EXISTS artifacts_experiment ON artifacts(experiment_id);
+"""
+
+ENTITY_TYPES = ("experiment", "run")
 
 
-def smart_round(
-    value: Union[int, float],
-    precision: int = 6,
-    *,
-    keep_exact_integers: bool = True,
-) -> Union[int, float]:
-    if value == 0:
-        return 0
+def dims_key(dims: Mapping[str, Any] | None) -> str:
+    """Canonical JSON for a dims mapping.
 
-    if keep_exact_integers and float(value).is_integer():
-        return int(value)
-
-    abs_val = abs(value)
-
-    if abs_val >= 1:
-        return round(value, precision)
-
-    digits = precision - 1 - int(math.floor(math.log10(abs_val)))
-    return round(value, digits)
+    Sorted and separator-free, so UNIQUE(run_id, metric, dims) still holds when a caller
+    passes the same dims with its keys in another order.
+    """
+    return json.dumps(dict(dims or {}), sort_keys=True, separators=(",", ":"))
 
 
 def default_serializer(obj: Any) -> Any:
-    if isinstance(obj, datetime):
+    if isinstance(obj, datetime | date):
         return obj.isoformat()
-    elif isinstance(obj, Enum):
+    if isinstance(obj, Enum):
         return obj.name
-    elif hasattr(obj, "__dict__"):
-        return str(obj)
-    else:
+    if isinstance(obj, int | float | str | bool) or obj is None:
         return obj
+    return str(obj)
+
+
+def serialize_params(params: Mapping[str, Any] | None, serializer=None) -> str | None:
+    if params is None:
+        return None
+    fn = serializer or default_serializer
+
+    def walk(obj):
+        if isinstance(obj, Mapping):
+            return {str(k): walk(v) for k, v in obj.items()}
+        if isinstance(obj, list | tuple):
+            return [walk(v) for v in obj]
+        return fn(obj)
+
+    return json.dumps(walk(dict(params)), sort_keys=True)
+
+
+def _git(args: Sequence[str]) -> str | None:
+    try:
+        out = subprocess.run(["git", *args], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def provenance() -> dict[str, Any]:
+    """What is needed to rebuild a run: the commit, whether the tree was dirty, the command.
+
+    A date alone is not a vintage. Outside a work tree the git fields are None rather than
+    an empty string, so "not a repository" is distinguishable from "clean".
+    """
+    commit = _git(["rev-parse", "HEAD"])
+    dirty = None
+    if commit is not None:
+        status = _git(["status", "--porcelain"])
+        dirty = None if status is None else int(bool(status))
+    return {
+        "git_commit": commit,
+        "git_dirty": dirty,
+        "argv": " ".join(sys.argv),
+        "python": sys.version.split()[0],
+    }
+
+
+def _entity_id(value: Any) -> int:
+    """Accept an id or a row dict wherever an experiment or run is named."""
+    if isinstance(value, Mapping):
+        for key in ("experiment_id", "run_id"):
+            if key in value:
+                return int(value[key])
+        raise ValueError("mapping has no experiment_id or run_id")
+    return int(value)
 
 
 class RunHandle:
     def __init__(self, tracker: "ExperimentTracker", run_id: int):
         self.tracker = tracker
         self.run_id = run_id
-        self._error = None
 
-    def log_model(
-        self,
-        model_name: str,
-        parameters: dict,
-        serializer: Callable[[Any], Any] | None = None,
+    def log_metric(self, metric: str, value: float, dims: Mapping[str, Any] | None = None) -> None:
+        self.tracker.log_metric(self.run_id, metric, value, dims)
+
+    def log_metrics(
+        self, metrics: Mapping[str, float], dims: Mapping[str, Any] | None = None
     ) -> None:
-        self.tracker.log_model(self.run_id, model_name, parameters, serializer)
+        self.tracker.log_metrics(self.run_id, metrics, dims)
 
     def log_predictions(
         self,
-        predictions: list[float],
-        actual_values: list[float] | None = None,
-        index: list[int] | None = None,
-        metrics: list[str] | None = None,
-        update: bool = True,
-        custom_metrics: dict[str, callable] | None = None,
+        predictions: Sequence[float],
+        actuals: Sequence[float] | None = None,
+        dims: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None = None,
+        replace: bool = True,
     ) -> None:
-        self.tracker.log_predictions(
-            self.run_id,
-            predictions,
-            actual_values,
-            index,
-            metrics,
-            update,
-            custom_metrics,
-        )
+        self.tracker.log_predictions(self.run_id, predictions, actuals, dims, replace)
 
-    def log_artifact(self, data: bytes, artifact_type: str, filename: str) -> int:
-        return self.tracker.log_artifact(self.run_id, data, artifact_type, filename)
+    def log_artifact(self, data: bytes, kind: str, filename: str) -> int:
+        return self.tracker.log_artifact(data, kind, filename, run=self.run_id)
 
-    def log_metric(self, metric_name: str, value: float) -> None:
-        self.tracker.log_metric(self.run_id, metric_name, value)
+    def log_file(self, path: str, kind: str | None = None) -> int:
+        return self.tracker.log_file(path, kind, run=self.run_id)
 
-    def log_metrics(self, metrics: dict[str, float]) -> None:
-        self.tracker.log_metrics(self.run_id, metrics)
+    def log_tag(self, name: str, value: str = "") -> None:
+        self.tracker.log_tag("run", self.run_id, name, value)
 
-    def log_tag(self, tag_name: str, tag_value: str = "") -> int:
-        return self.tracker.log_tag("run", self.run_id, tag_name, tag_value)
+    def set_note(self, note: str) -> None:
+        self.tracker.set_note("run", self.run_id, note)
 
-    def __enter__(self):
+    def __enter__(self) -> Self:
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         if exc_type is None:
-            self.tracker.end_run(self.run_id, success=True)
+            self.tracker.end_run(self.run_id)
         else:
-            error_msg = str(exc_val) if exc_val else f"{exc_type.__name__} occurred"
-            self.tracker.end_run(self.run_id, success=False, error=error_msg)
+            message = str(exc_val) or exc_type.__name__
+            self.tracker.end_run(self.run_id, success=False, error=message)
         return False
 
 
 class ExperimentTracker:
     def __init__(self, db_path: str = "experiments.db"):
+        self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self._initialize_db()
-
-    def _initialize_db(self):
-        cursor = self.conn.cursor()
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS experiments (
-                experiment_id INTEGER PRIMARY KEY,
-                experiment_name TEXT NOT NULL,
-                experiment_description TEXT,
-                created_time TEXT DEFAULT (datetime('now'))
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                run_id INTEGER PRIMARY KEY,
-                experiment_id INTEGER,
-                run_status TEXT CHECK(run_status IN ('RUNNING', 'COMPLETED', 'FAILED')),
-                run_start_time TEXT,
-                run_end_time TEXT,
-                error TEXT,
-                FOREIGN KEY (experiment_id) REFERENCES experiments(experiment_id)
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS models (
-                model_id INTEGER PRIMARY KEY,
-                run_id INTEGER,
-                model_name TEXT NOT NULL,
-                parameters TEXT,
-                FOREIGN KEY (run_id) REFERENCES runs(run_id)
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS predictions (
-                prediction_id INTEGER PRIMARY KEY,
-                run_id INTEGER,
-                idx INTEGER,
-                prediction REAL,
-                actual REAL,
-                FOREIGN KEY (run_id) REFERENCES runs(run_id)
-            )
-        """
-        )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS metrics (
-                run_id INTEGER,
-                metric TEXT NOT NULL,
-                metric_value REAL NOT NULL,
-                UNIQUE(run_id, metric),
-                FOREIGN KEY (run_id) REFERENCES runs(run_id)
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS tags (
-                tag_id INTEGER PRIMARY KEY,
-                entity_type TEXT CHECK(entity_type IN ('experiment', 'run')),
-                entity_id INTEGER,
-                tag_name TEXT NOT NULL,
-                tag_value TEXT
-            )
-        """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS artifacts (
-                artifact_id INTEGER PRIMARY KEY,
-                run_id INTEGER,
-                artifact_type TEXT NOT NULL,
-                filename TEXT NOT NULL,
-                data BLOB NOT NULL,
-                created_time TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (run_id) REFERENCES runs(run_id)
-            )
-        """
-        )
-
+        if db_path != ":memory:":
+            self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.executescript(SCHEMA)
         self.conn.commit()
 
-    def create_experiment(
-        self, experiment_name: str, experiment_description: str | None = None
+    def close(self) -> None:
+        self.conn.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        self.close()
+        return False
+
+    # ----- writes -----
+
+    def experiment(
+        self,
+        name: str,
+        description: str | None = None,
+        note: str | None = None,
+        tags: Mapping[str, Any] | None = None,
+        get_or_create: bool = False,
     ) -> int:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO experiments (experiment_name, experiment_description) VALUES (?, ?)",
-            (experiment_name, experiment_description),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
+        """Create an experiment and record how it was produced.
 
-    def start_run(self, experiment_id: int) -> int:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "INSERT INTO runs (experiment_id, run_status, run_start_time) VALUES (?, 'RUNNING', datetime('now'))",
-            (experiment_id,),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
+        get_or_create returns the newest experiment of this name instead of adding another,
+        which is what one long-lived named benchmark needs.
+        """
+        if get_or_create:
+            row = self.conn.execute(
+                "SELECT experiment_id FROM experiments WHERE name = ?"
+                " ORDER BY experiment_id DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+            if row is not None:
+                if tags:
+                    self.log_tags("experiment", row["experiment_id"], tags)
+                return int(row["experiment_id"])
 
-    def run(self, experiment_id: int, tags: dict[str, str] | None = None) -> RunHandle:
-        run_id = self.start_run(experiment_id)
+        prov = provenance()
+        cursor = self.conn.execute(
+            "INSERT INTO experiments (name, description, note, git_commit, git_dirty,"
+            " argv, python) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                name,
+                description,
+                note,
+                prov["git_commit"],
+                prov["git_dirty"],
+                prov["argv"],
+                prov["python"],
+            ),
+        )
+        experiment_id = int(cursor.lastrowid)
         if tags:
-            for tag_name, tag_value in tags.items():
-                self.log_tag("run", run_id, tag_name, tag_value)
-        return RunHandle(self, run_id)
+            self.log_tags("experiment", experiment_id, tags)
+        self.conn.commit()
+        return experiment_id
 
-    def log_model(
+    def start_run(
         self,
-        run_id: int,
-        model_name: str,
-        parameters: dict,
-        serializer: Callable[[Any], Any] | None = None,
-    ) -> None:
-        cursor = self.conn.cursor()
-        if serializer is None:
-            serializer = default_serializer
+        experiment: int | Mapping[str, Any],
+        name: str | None = None,
+        params: Mapping[str, Any] | None = None,
+        tags: Mapping[str, Any] | None = None,
+        note: str | None = None,
+    ) -> int:
+        experiment_id = _entity_id(experiment)
+        if self.get_experiment(experiment_id) is None:
+            raise ValueError(f"experiment {experiment_id} does not exist")
+        cursor = self.conn.execute(
+            "INSERT INTO runs (experiment_id, name, params, status, note)"
+            " VALUES (?, ?, ?, 'running', ?)",
+            (experiment_id, name, serialize_params(params), note),
+        )
+        run_id = int(cursor.lastrowid)
+        if tags:
+            self.log_tags("run", run_id, tags)
+        self.conn.commit()
+        return run_id
 
-        def serialize_recursive(obj):
-            if isinstance(obj, dict):
-                return {k: serialize_recursive(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [serialize_recursive(item) for item in obj]
-            else:
-                return serializer(obj)
+    def run(
+        self,
+        experiment: int | Mapping[str, Any],
+        name: str | None = None,
+        params: Mapping[str, Any] | None = None,
+        tags: Mapping[str, Any] | None = None,
+        note: str | None = None,
+    ) -> RunHandle:
+        return RunHandle(self, self.start_run(experiment, name, params, tags, note))
 
-        serialized_params = json.dumps(serialize_recursive(parameters))
-        cursor.execute(
-            "INSERT INTO models (run_id, model_name, parameters) VALUES (?, ?, ?)",
-            (run_id, model_name, serialized_params),
+    def end_run(self, run: int, success: bool = True, error: str | None = None) -> None:
+        self.conn.execute(
+            "UPDATE runs SET status = ?, ended_at = datetime('now'), error = ? WHERE run_id = ?",
+            ("completed" if success else "failed", error, _entity_id(run)),
         )
         self.conn.commit()
 
-    def _log_metric(self, run_id: int, metric_name: str, value: float) -> None:
-        cursor = self.conn.cursor()
-        rounded_value = smart_round(value)
-        cursor.execute(
-            """INSERT INTO metrics (run_id, metric, metric_value)
-               VALUES (?, ?, ?)
-               ON CONFLICT(run_id, metric) DO UPDATE SET metric_value = ?""",
-            (run_id, metric_name, rounded_value, rounded_value),
+    def set_params(self, run: int, params: Mapping[str, Any]) -> None:
+        self.conn.execute(
+            "UPDATE runs SET params = ? WHERE run_id = ?",
+            (serialize_params(params), _entity_id(run)),
         )
+        self.conn.commit()
 
-    def _calculate_default_metrics(
+    def set_note(self, entity_type: str, entity_id: int, note: str) -> None:
+        if entity_type not in ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of {ENTITY_TYPES}")
+        table = "experiments" if entity_type == "experiment" else "runs"
+        column = f"{entity_type}_id"
+        cursor = self.conn.execute(
+            f"UPDATE {table} SET note = ? WHERE {column} = ?",
+            (note, _entity_id(entity_id)),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"{entity_type} {entity_id} does not exist")
+        self.conn.commit()
+
+    def log_metric(
         self,
-        run_id: int,
-        predictions: list[float],
-        actual_values: list[float],
-        metrics: list[str] | None = None,
+        run: int,
+        metric: str,
+        value: float,
+        dims: Mapping[str, Any] | None = None,
     ) -> None:
-        if metrics is None:
-            metrics = ["rmse", "mae"]
+        self.log_metrics(run, {metric: value}, dims)
 
-        n = len(predictions)
-        available_metrics = {
-            "rmse": lambda: math.sqrt(
-                sum((p - a) ** 2 for p, a in zip(predictions, actual_values)) / n
-            ),
-            "mae": lambda: sum(abs(p - a) for p, a in zip(predictions, actual_values))
-            / n,
-            "mape": lambda: (
-                (
-                    sum(
-                        abs((a - p) / a)
-                        for p, a in zip(predictions, actual_values)
-                        if a != 0
-                    )
-                    / sum(1 for a in actual_values if a != 0)
-                )
-                if any(a != 0 for a in actual_values)
-                else 0
-            ),
-        }
-
-        for metric_name in metrics:
-            if metric_name in available_metrics:
-                value = available_metrics[metric_name]()
-                self._log_metric(run_id, metric_name, value)
+    def log_metrics(
+        self,
+        run: int,
+        metrics: Mapping[str, float],
+        dims: Mapping[str, Any] | None = None,
+    ) -> None:
+        run_id = self._require_run(run)
+        key = dims_key(dims)
+        self.conn.executemany(
+            "INSERT INTO metrics (run_id, metric, dims, value) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(run_id, metric, dims) DO UPDATE SET value = excluded.value",
+            [(run_id, name, key, float(value)) for name, value in metrics.items()],
+        )
+        self.conn.commit()
 
     def log_predictions(
         self,
-        run_id: int,
-        predictions: list[float],
-        actual_values: list[float] | None = None,
-        index: list[int] | None = None,
-        metrics: list[str] | None = None,
-        update: bool = True,
-        custom_metrics: dict[str, callable] | None = None,
+        run: int,
+        predictions: Sequence[float],
+        actuals: Sequence[float] | None = None,
+        dims: Sequence[Mapping[str, Any]] | Mapping[str, Any] | None = None,
+        replace: bool = True,
     ) -> None:
-        if not isinstance(predictions, list):
-            raise TypeError("predictions must be a list")
-        if actual_values is not None:
-            if not isinstance(actual_values, list):
-                raise TypeError("actual_values must be a list")
-            if len(predictions) != len(actual_values):
-                raise ValueError(
-                    "predictions and actual_values must have the same length"
-                )
-        if index is not None and len(index) != len(predictions):
-            raise ValueError("index must have the same length as predictions")
+        """Store rows keyed by dims. Computes no metrics; use the scoring module.
 
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (run_id,))
-        if cursor.fetchone() is None:
-            raise ValueError(f"Run ID {run_id} does not exist")
-
-        if update:
-            cursor.execute("DELETE FROM predictions WHERE run_id = ?", (run_id,))
-
-        if actual_values is None:
-            if index is None:
-                for pred in predictions:
-                    cursor.execute(
-                        "INSERT INTO predictions (run_id, prediction) VALUES (?, ?)",
-                        (run_id, smart_round(pred)),
-                    )
-            else:
-                for pred, idx in zip(predictions, index):
-                    cursor.execute(
-                        "INSERT INTO predictions (run_id, idx, prediction) VALUES (?, ?, ?)",
-                        (run_id, idx, smart_round(pred)),
-                    )
+        dims is either one mapping shared by every row, or one mapping per row. Passing
+        neither stores rows that cannot be addressed later, so it warrants a reason.
+        """
+        run_id = self._require_run(run)
+        predictions = list(predictions)
+        if actuals is not None:
+            actuals = list(actuals)
+            if len(actuals) != len(predictions):
+                raise ValueError("predictions and actuals must have the same length")
+        if isinstance(dims, Mapping) or dims is None:
+            keys = [dims_key(dims)] * len(predictions)
         else:
-            if index is None:
-                for pred, actual in zip(predictions, actual_values):
-                    cursor.execute(
-                        "INSERT INTO predictions (run_id, prediction, actual) VALUES (?, ?, ?)",
-                        (run_id, smart_round(pred), smart_round(actual)),
-                    )
-            else:
-                for pred, actual, idx in zip(predictions, actual_values, index):
-                    cursor.execute(
-                        "INSERT INTO predictions (run_id, idx, prediction, actual) VALUES (?, ?, ?, ?)",
-                        (run_id, idx, smart_round(pred), smart_round(actual)),
-                    )
+            dims = list(dims)
+            if len(dims) != len(predictions):
+                raise ValueError("dims must have the same length as predictions")
+            keys = [dims_key(d) for d in dims]
 
-        if actual_values is not None:
-            self._calculate_default_metrics(run_id, predictions, actual_values, metrics)
-
-            if custom_metrics:
-                for name, metric_fn in custom_metrics.items():
-                    value = metric_fn(predictions, actual_values)
-                    self._log_metric(run_id, name, value)
-
+        if replace:
+            self.conn.execute("DELETE FROM predictions WHERE run_id = ?", (run_id,))
+        rows = [
+            (
+                run_id,
+                keys[i],
+                float(predictions[i]),
+                None if actuals is None else float(actuals[i]),
+            )
+            for i in range(len(predictions))
+        ]
+        self.conn.executemany(
+            "INSERT INTO predictions (run_id, dims, prediction, actual) VALUES (?, ?, ?, ?)",
+            rows,
+        )
         self.conn.commit()
 
     def log_artifact(
-        self, run_id: int, data: bytes, artifact_type: str, filename: str
-    ) -> int:
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (run_id,))
-        if cursor.fetchone() is None:
-            raise ValueError(f"Run ID {run_id} does not exist")
-
-        cursor.execute(
-            "INSERT INTO artifacts (run_id, artifact_type, filename, data) VALUES (?, ?, ?, ?)",
-            (run_id, artifact_type, filename, data),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
-
-    def get_artifacts(self, run_id: int) -> list[dict]:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT artifact_id, artifact_type, filename, created_time FROM artifacts WHERE run_id = ? ORDER BY created_time",
-            (run_id,),
-        )
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in rows]
-
-    def get_artifact_data(self, artifact_id: int) -> bytes:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT data FROM artifacts WHERE artifact_id = ?", (artifact_id,)
-        )
-        row = cursor.fetchone()
-        if row is None:
-            raise ValueError(f"Artifact ID {artifact_id} does not exist")
-        return row[0]
-
-    def end_run(
-        self, run_id: int, success: bool = True, error: str | None = None
-    ) -> None:
-        cursor = self.conn.cursor()
-        status = "COMPLETED" if success else "FAILED"
-        cursor.execute(
-            """UPDATE runs
-            SET run_status = ?,
-                run_end_time = datetime('now'),
-                error = ?
-            WHERE run_id = ?""",
-            (status, error, run_id),
-        )
-        self.conn.commit()
-
-    def get_experiment(self, experiment_id: int) -> dict | None:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT experiment_id, experiment_name, experiment_description, created_time FROM experiments WHERE experiment_id = ?",
-            (experiment_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:
-            return None
-        columns = [col[0] for col in cursor.description]
-        return dict(zip(columns, row))
-
-    def get_run_history(self, experiment_id: int) -> list[dict]:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT run_id, experiment_id, run_status, run_start_time, run_end_time, error FROM runs WHERE experiment_id = ? ORDER BY run_start_time DESC",
-            (experiment_id,),
-        )
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in rows]
-
-    def get_all_runs(self, experiment_id: int) -> list[dict]:
-        runs = self.get_run_history(experiment_id)
-        result = []
-        for run in runs:
-            run_id = run["run_id"]
-            run_data = {
-                "run_id": run_id,
-                "experiment_id": run["experiment_id"],
-                "run_status": run["run_status"],
-                "run_start_time": run["run_start_time"],
-                "run_end_time": run["run_end_time"],
-                "error": run["error"],
-                "model": self.get_model(run_id),
-                "tags": self.get_tags("run", run_id),
-                "metrics": self._get_metrics_safe(run_id),
-            }
-            result.append(run_data)
-        return result
-
-    def _get_metrics_safe(self, run_id: int) -> dict:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT metric, metric_value FROM metrics WHERE run_id = ?", (run_id,)
-        )
-        rows = cursor.fetchall()
-        return {name: value for name, value in rows}
-
-    def get_model(self, run_id: int) -> dict | None:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT model_id, run_id, model_name, parameters FROM models WHERE run_id = ?",
-            (run_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:
-            return None
-        columns = [col[0] for col in cursor.description]
-        model = dict(zip(columns, row))
-        model["parameters"] = json.loads(model["parameters"])
-        return model
-
-    def get_predictions(self, run_id: int) -> dict:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT prediction, actual, idx FROM predictions WHERE run_id = ? ORDER BY idx",
-            (run_id,),
-        )
-        results = cursor.fetchall()
-        if not results:
-            raise ValueError(f"No predictions found for run id {run_id}")
-
-        preds = [row[0] for row in results]
-        actuals = [row[1] for row in results]
-        index = [row[2] for row in results]
-
-        return {"predictions": preds, "actuals": actuals, "index": index}
-
-    def log_metric(self, run_id: int, metric_name: str, value: float) -> None:
-        self._log_metric(run_id, metric_name, value)
-        self.conn.commit()
-
-    def log_metrics(self, run_id: int, metrics: dict[str, float]) -> None:
-        for name, value in metrics.items():
-            self._log_metric(run_id, name, value)
-        self.conn.commit()
-
-    def get_metrics(self, run_id: int) -> dict:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT metric, metric_value FROM metrics WHERE run_id = ?", (run_id,)
-        )
-        rows = cursor.fetchall()
-        if not rows:
-            raise ValueError(f"No metrics found for run id {run_id}")
-        return {name: value for name, value in rows}
-
-    def log_tag(
-        self, entity_type: str, entity_id: int, tag_name: str, tag_value: str = ""
-    ) -> int:
-        if entity_type not in ["experiment", "run"]:
-            raise ValueError("entity_type must be either 'experiment' or 'run'")
-
-        cursor = self.conn.cursor()
-        if entity_type == "experiment":
-            cursor.execute(
-                "SELECT experiment_id FROM experiments WHERE experiment_id = ?",
-                (entity_id,),
-            )
-        else:
-            cursor.execute("SELECT run_id FROM runs WHERE run_id = ?", (entity_id,))
-
-        if cursor.fetchone() is None:
-            raise ValueError(
-                f"{entity_type.capitalize()} with ID {entity_id} does not exist"
-            )
-
-        cursor.execute(
-            "INSERT INTO tags (entity_type, entity_id, tag_name, tag_value) VALUES (?, ?, ?, ?)",
-            (entity_type, entity_id, tag_name, tag_value),
-        )
-        self.conn.commit()
-        return cursor.lastrowid
-
-    def get_tags(self, entity_type: str, entity_id: int) -> dict:
-        if entity_type not in ["experiment", "run"]:
-            raise ValueError("entity_type must be either 'experiment' or 'run'")
-
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT tag_name, tag_value FROM tags WHERE entity_type = ? AND entity_id = ?",
-            (entity_type, entity_id),
-        )
-        return {name: value for name, value in cursor.fetchall()}
-
-    def get_tagged_entities(
-        self, entity_type: str, tag_name: str, tag_value: str = None
-    ) -> list:
-        if entity_type not in ["experiment", "run"]:
-            raise ValueError("entity_type must be either 'experiment' or 'run'")
-
-        cursor = self.conn.cursor()
-        if tag_value is None:
-            cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag_name = ?",
-                (entity_type, tag_name),
-            )
-        else:
-            cursor.execute(
-                "SELECT DISTINCT entity_id FROM tags WHERE entity_type = ? AND tag_name = ? AND tag_value = ?",
-                (entity_type, tag_name, tag_value),
-            )
-
-        return [row[0] for row in cursor.fetchall()]
-
-    def find_runs(
-        self, tags: dict[str, str], experiment_id: int | None = None
-    ) -> list[int]:
-        cursor = self.conn.cursor()
-
-        base_query = """
-            SELECT DISTINCT r.run_id 
-            FROM runs r
-            JOIN tags t ON t.entity_type = 'run' AND t.entity_id = r.run_id
-        """
-
-        conditions = []
-        params = []
-
-        if experiment_id is not None:
-            conditions.append("r.experiment_id = ?")
-            params.append(experiment_id)
-
-        for tag_name, tag_value in tags.items():
-            conditions.append("(t.tag_name = ? AND t.tag_value = ?)")
-            params.extend([tag_name, tag_value])
-
-        if conditions:
-            query = base_query + " WHERE " + " AND ".join(conditions)
-        else:
-            query = "SELECT run_id FROM runs" + (
-                f" WHERE experiment_id = {experiment_id}" if experiment_id else ""
-            )
-            params = []
-
-        query += f" GROUP BY r.run_id HAVING COUNT(*) = {len(tags)}" if tags else ""
-
-        cursor.execute(query, params)
-        return [row[0] for row in cursor.fetchall()]
-
-    def aggregate(
         self,
-        experiment_id: int,
-        metric: str,
-        group_by: list[str] | None = None,
-        group_by_params: list[str] | None = None,
-        where_tags: dict[str, str] | None = None,
-        aggregations: list[str] | None = None,
-    ) -> list[dict]:
-        if aggregations is None:
-            aggregations = ["mean", "std", "count"]
-
-        cursor = self.conn.cursor()
-
-        agg_funcs = {
-            "mean": "AVG(m.metric_value)",
-            "std": "SQRT(AVG(m.metric_value * m.metric_value) - AVG(m.metric_value) * AVG(m.metric_value))",
-            "count": "COUNT(m.metric_value)",
-            "min": "MIN(m.metric_value)",
-            "max": "MAX(m.metric_value)",
-            "sum": "SUM(m.metric_value)",
-        }
-
-        select_parts = []
-        for agg_name in aggregations:
-            if agg_name in agg_funcs:
-                select_parts.append(f"{agg_funcs[agg_name]} as {metric}_{agg_name}")
-
-        group_select = []
-        group_by_cols = []
-        joins = []
-        need_models_join = False
-
-        if group_by:
-            for col in group_by:
-                if col == "model":
-                    need_models_join = True
-                    group_select.append("mo.model_name as model")
-                    group_by_cols.append("mo.model_name")
-                else:
-                    group_select.append(f"t_{col}.tag_value as {col}")
-                    group_by_cols.append(f"t_{col}.tag_value")
-                    joins.append(
-                        f"JOIN tags t_{col} ON t_{col}.entity_type = 'run' "
-                        f"AND t_{col}.entity_id = r.run_id AND t_{col}.tag_name = '{col}'"
-                    )
-
-        if group_by_params:
-            need_models_join = True
-            for param in group_by_params:
-                json_path = "$." + param.replace(".", ".")
-                col_alias = param.split(".")[-1]
-                group_select.append(
-                    f"json_extract(mo.parameters, '{json_path}') as \"{col_alias}\""
-                )
-                group_by_cols.append(f"json_extract(mo.parameters, '{json_path}')")
-
-        if need_models_join:
-            joins.insert(0, "JOIN models mo ON r.run_id = mo.run_id")
-
-        all_select = group_select + select_parts
-        base_query = f"SELECT {', '.join(all_select)} FROM metrics m JOIN runs r ON m.run_id = r.run_id"
-
-        for join in joins:
-            base_query += " " + join
-
-        conditions = [f"r.experiment_id = {experiment_id}", f"m.metric = '{metric}'"]
-
-        if where_tags:
-            for tag_name, tag_value in where_tags.items():
-                base_query += f" JOIN tags wt_{tag_name} ON wt_{tag_name}.entity_type = 'run' AND wt_{tag_name}.entity_id = r.run_id"
-                conditions.append(
-                    f"wt_{tag_name}.tag_name = '{tag_name}' AND wt_{tag_name}.tag_value = '{tag_value}'"
-                )
-
-        query = base_query + " WHERE " + " AND ".join(conditions)
-
-        if group_by_cols:
-            query += f" GROUP BY {', '.join(group_by_cols)}"
-
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in rows]
-
-    def delete_tag(
-        self, entity_type: str, entity_id: int, tag_name: str, tag_value: str = None
+        data: bytes,
+        kind: str,
+        filename: str,
+        run: int | None = None,
+        experiment: int | None = None,
     ) -> int:
-        if entity_type not in ["experiment", "run"]:
-            raise ValueError("entity_type must be either 'experiment' or 'run'")
-
-        cursor = self.conn.cursor()
-        if tag_value is None:
-            cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag_name = ?",
-                (entity_type, entity_id, tag_name),
-            )
-        else:
-            cursor.execute(
-                "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND tag_name = ? AND tag_value = ?",
-                (entity_type, entity_id, tag_name, tag_value),
-            )
-
-        deleted_count = cursor.rowcount
+        """Attach a file. A run-scoped artifact belongs to its experiment too."""
+        run_id = None if run is None else self._require_run(run)
+        experiment_id = None if experiment is None else _entity_id(experiment)
+        if run_id is not None and experiment_id is None:
+            row = self.conn.execute(
+                "SELECT experiment_id FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            experiment_id = int(row["experiment_id"])
+        if run_id is None and experiment_id is None:
+            raise ValueError("give a run or an experiment")
+        if experiment_id is not None and self.get_experiment(experiment_id) is None:
+            raise ValueError(f"experiment {experiment_id} does not exist")
+        cursor = self.conn.execute(
+            "INSERT INTO artifacts (experiment_id, run_id, kind, filename, data)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (experiment_id, run_id, kind, filename, data),
+        )
         self.conn.commit()
-        return deleted_count
+        return int(cursor.lastrowid)
 
-    def export_experiment(self, experiment_id: int, export_dir: str) -> str:
-        experiment = self.get_experiment(experiment_id)
-        if experiment is None:
-            raise ValueError(f"Experiment ID {experiment_id} does not exist")
-
-        if not os.path.exists(export_dir):
-            os.makedirs(export_dir)
-
-        exp_name = experiment["experiment_name"].replace(" ", "_")
-        exp_export_dir = os.path.join(
-            export_dir, f"experiment_{experiment_id}_{exp_name}"
+    def log_file(
+        self,
+        path: str,
+        kind: str | None = None,
+        run: int | None = None,
+        experiment: int | None = None,
+    ) -> int:
+        with open(path, "rb") as stream:
+            data = stream.read()
+        name = os.path.basename(path)
+        return self.log_artifact(
+            data,
+            kind or (os.path.splitext(name)[1].lstrip(".") or "file"),
+            name,
+            run=run,
+            experiment=experiment,
         )
-        os.makedirs(exp_export_dir, exist_ok=True)
 
-        self._export_experiment_data(experiment, exp_export_dir)
-        self._export_runs_data(experiment_id, exp_export_dir)
-        self._export_tags_data(experiment_id, exp_export_dir)
+    def log_tag(self, entity_type: str, entity_id: int, name: str, value: str = "") -> None:
+        self.log_tags(entity_type, entity_id, {name: value})
 
-        return exp_export_dir
+    def log_tags(self, entity_type: str, entity_id: int, tags: Mapping[str, Any]) -> None:
+        """Tags are unique per entity and name, so re-tagging updates instead of duplicating.
 
-    def _export_experiment_data(self, experiment: dict, export_dir: str) -> None:
-        with open(os.path.join(export_dir, "experiments.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "experiment_id",
-                    "experiment_name",
-                    "experiment_description",
-                    "created_time",
-                ]
-            )
-            writer.writerow(
-                [
-                    experiment["experiment_id"],
-                    experiment["experiment_name"],
-                    experiment["experiment_description"] or "",
-                    experiment["created_time"],
-                ]
-            )
-
-    def _export_runs_data(self, experiment_id: int, export_dir: str) -> None:
-        runs = self.get_run_history(experiment_id)
-
-        with open(os.path.join(export_dir, "runs.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                [
-                    "run_id",
-                    "experiment_id",
-                    "run_status",
-                    "run_start_time",
-                    "run_end_time",
-                    "error",
-                ]
-            )
-            for run in runs:
-                writer.writerow(
-                    [
-                        run["run_id"],
-                        experiment_id,
-                        run["run_status"],
-                        run["run_start_time"],
-                        run["run_end_time"] or "",
-                        run["error"] or "",
-                    ]
-                )
-
-        self._export_models_data(runs, export_dir)
-        self._export_predictions_data(runs, export_dir)
-        self._export_metrics_data(runs, export_dir)
-
-    def _export_models_data(self, runs: list, export_dir: str) -> None:
-        with open(os.path.join(export_dir, "models.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["model_id", "run_id", "model_name", "parameters"])
-            for run in runs:
-                try:
-                    model = self.get_model(run["run_id"])
-                    if model:
-                        writer.writerow(
-                            [
-                                model["model_id"],
-                                run["run_id"],
-                                model["model_name"],
-                                json.dumps(model["parameters"]),
-                            ]
-                        )
-                except ValueError:
-                    continue
-
-    def _export_predictions_data(self, runs: list, export_dir: str) -> None:
-        with open(os.path.join(export_dir, "predictions.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["run_id", "prediction", "actual", "idx"])
-            for run in runs:
-                try:
-                    predictions = self.get_predictions(run["run_id"])
-                    for i, pred in enumerate(predictions["predictions"]):
-                        writer.writerow(
-                            [
-                                run["run_id"],
-                                pred,
-                                predictions["actuals"][i],
-                                (
-                                    predictions["index"][i]
-                                    if i < len(predictions["index"])
-                                    else ""
-                                ),
-                            ]
-                        )
-                except ValueError:
-                    continue
-
-    def _export_metrics_data(self, runs: list, export_dir: str) -> None:
-        with open(os.path.join(export_dir, "metrics.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(["run_id", "metric", "metric_value"])
-            for run in runs:
-                try:
-                    metrics = self.get_metrics(run["run_id"])
-                    for name, value in metrics.items():
-                        writer.writerow([run["run_id"], name, value])
-                except ValueError:
-                    continue
-
-    def _export_tags_data(self, experiment_id: int, export_dir: str) -> None:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT tag_id, entity_type, entity_id, tag_name, tag_value FROM tags WHERE (entity_type = 'experiment' AND entity_id = ?) OR (entity_type = 'run' AND entity_id IN (SELECT run_id FROM runs WHERE experiment_id = ?))",
-            (experiment_id, experiment_id),
+        Duplicates used to accumulate silently and then drop the entity from tag filters.
+        """
+        if entity_type not in ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of {ENTITY_TYPES}")
+        entity_id = _entity_id(entity_id)
+        table = "experiments" if entity_type == "experiment" else "runs"
+        column = f"{entity_type}_id"
+        exists = self.conn.execute(
+            f"SELECT 1 FROM {table} WHERE {column} = ?", (entity_id,)
+        ).fetchone()
+        if exists is None:
+            raise ValueError(f"{entity_type} {entity_id} does not exist")
+        self.conn.executemany(
+            "INSERT INTO tags (entity_type, entity_id, name, value) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(entity_type, entity_id, name) DO UPDATE SET value = excluded.value",
+            [(entity_type, entity_id, k, "" if v is None else str(v)) for k, v in tags.items()],
         )
-        tags = cursor.fetchall()
+        self.conn.commit()
 
-        with open(os.path.join(export_dir, "tags.csv"), "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow(
-                ["tag_id", "entity_type", "entity_id", "tag_name", "tag_value"]
-            )
-            for tag in tags:
-                writer.writerow(tag)
-
-    def import_experiment(self, import_dir: str) -> int:
-        if not os.path.exists(import_dir):
-            raise ValueError(f"Import directory {import_dir} does not exist")
-
-        exp_file = os.path.join(import_dir, "experiments.csv")
-        if not os.path.exists(exp_file):
-            raise ValueError(f"experiments.csv not found in {import_dir}")
-
-        with open(exp_file, "r", newline="") as f:
-            reader = csv.reader(f)
-            next(reader)
-            row = next(reader)
-            exp_name = row[1]
-            exp_description = row[2] if row[2] else None
-
-        experiment_id = self.create_experiment(exp_name, exp_description)
-
-        runs_file = os.path.join(import_dir, "runs.csv")
-        if not os.path.exists(runs_file):
-            return experiment_id
-
-        run_id_map = {}
-
-        with open(runs_file, "r", newline="") as f:
-            reader = csv.reader(f)
-            next(reader)
-            for row in reader:
-                original_run_id = int(row[0])
-                status = row[2]
-                error = row[5] if len(row) > 5 and row[5] else None
-
-                run_id = self.start_run(experiment_id)
-                run_id_map[original_run_id] = run_id
-
-                if status != "RUNNING":
-                    self.end_run(run_id, success=(status == "COMPLETED"), error=error)
-
-        models_file = os.path.join(import_dir, "models.csv")
-        if os.path.exists(models_file):
-            with open(models_file, "r", newline="") as f:
-                reader = csv.reader(f)
-                next(reader)
-                for row in reader:
-                    original_run_id = int(row[1])
-                    if original_run_id in run_id_map:
-                        new_run_id = run_id_map[original_run_id]
-                        model_name = row[2]
-                        parameters = json.loads(row[3])
-                        self.log_model(new_run_id, model_name, parameters)
-
-        predictions_file = os.path.join(import_dir, "predictions.csv")
-        if os.path.exists(predictions_file):
-            prediction_data = {}
-
-            with open(predictions_file, "r", newline="") as f:
-                reader = csv.reader(f)
-                next(reader)
-                for row in reader:
-                    original_run_id = int(row[0])
-                    if original_run_id in run_id_map:
-                        if original_run_id not in prediction_data:
-                            prediction_data[original_run_id] = {
-                                "preds": [],
-                                "actuals": [],
-                            }
-
-                        prediction_data[original_run_id]["preds"].append(float(row[1]))
-                        prediction_data[original_run_id]["actuals"].append(
-                            float(row[2])
-                        )
-
-            for original_run_id, data in prediction_data.items():
-                new_run_id = run_id_map[original_run_id]
-                if data["preds"] and data["actuals"]:
-                    self.log_predictions(new_run_id, data["preds"], data["actuals"])
-
-        metrics_file = os.path.join(import_dir, "metrics.csv")
-        if os.path.exists(metrics_file):
-            with open(metrics_file, "r", newline="") as f:
-                reader = csv.reader(f)
-                next(reader)
-                for row in reader:
-                    original_run_id = int(row[0])
-                    if original_run_id in run_id_map:
-                        new_run_id = run_id_map[original_run_id]
-                        metric_name = row[1]
-                        metric_value = float(row[2])
-
-                        if metric_name not in ["rmse", "mae"]:
-                            self.log_metric(new_run_id, metric_name, metric_value)
-
-        tags_file = os.path.join(import_dir, "tags.csv")
-        if os.path.exists(tags_file):
-            with open(tags_file, "r", newline="") as f:
-                reader = csv.reader(f)
-                next(reader)
-                for row in reader:
-                    entity_type = row[1]
-                    original_entity_id = int(row[2])
-                    tag_name = row[3]
-                    tag_value = row[4] if len(row) > 4 and row[4] else ""
-
-                    if entity_type == "experiment":
-                        new_entity_id = experiment_id
-                    elif entity_type == "run" and original_entity_id in run_id_map:
-                        new_entity_id = run_id_map[original_entity_id]
-                    else:
-                        continue
-
-                    self.log_tag(entity_type, new_entity_id, tag_name, tag_value)
-
-        return experiment_id
-
-    def list_experiments(self, limit: int = 10) -> list[dict]:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT experiment_id, experiment_name, experiment_description, created_time FROM experiments ORDER BY created_time DESC LIMIT ?",
-            (limit,),
+    def delete_tag(self, entity_type: str, entity_id: int, name: str) -> int:
+        if entity_type not in ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of {ENTITY_TYPES}")
+        cursor = self.conn.execute(
+            "DELETE FROM tags WHERE entity_type = ? AND entity_id = ? AND name = ?",
+            (entity_type, _entity_id(entity_id), name),
         )
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in rows]
+        self.conn.commit()
+        return cursor.rowcount
 
-    def find_experiments(self, name_pattern: str) -> list[dict]:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT experiment_id, experiment_name, experiment_description, created_time FROM experiments WHERE experiment_name LIKE ? ORDER BY created_time DESC",
-            (f"%{name_pattern}%",),
-        )
-        rows = cursor.fetchall()
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in rows]
+    def delete_experiment(self, experiment: int) -> None:
+        """Cascades to runs, metrics, predictions, and artifacts.
 
-    def delete_experiment(self, experiment_id: int) -> None:
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT experiment_id FROM experiments WHERE experiment_id = ?",
-            (experiment_id,),
-        )
-        if cursor.fetchone() is None:
-            raise ValueError(f"Experiment ID {experiment_id} does not exist")
-
-        cursor.execute(
+        Without ON DELETE CASCADE this raised IntegrityError for every experiment that had
+        a run, which is every real one.
+        """
+        experiment_id = _entity_id(experiment)
+        cursor = self.conn.execute(
             "DELETE FROM experiments WHERE experiment_id = ?", (experiment_id,)
         )
+        if cursor.rowcount == 0:
+            raise ValueError(f"experiment {experiment_id} does not exist")
+        self.conn.execute(
+            "DELETE FROM tags WHERE entity_type = 'experiment' AND entity_id = ?",
+            (experiment_id,),
+        )
         self.conn.commit()
 
-    def best_run(
-        self,
-        experiment_id: int,
-        metric: str,
-        minimize: bool = True,
-        where_tags: dict[str, str] | None = None,
-    ) -> dict | None:
-        """Find the best performing run by a given metric.
-
-        Args:
-            experiment_id: The experiment to search within.
-            metric: The metric name to optimize.
-            minimize: If True, find lowest value; if False, find highest.
-            where_tags: Optional tag filters to apply.
-
-        Returns:
-            Full run data dict for the best run, or None if no matching runs.
-        """
-        cursor = self.conn.cursor()
-
-        query = """
-            SELECT r.run_id, m.metric_value
-            FROM runs r
-            JOIN metrics m ON r.run_id = m.run_id
-            WHERE r.experiment_id = ? AND m.metric = ?
-        """
-        params: list = [experiment_id, metric]
-
-        if where_tags:
-            for tag_name, tag_value in where_tags.items():
-                query += f"""
-                    AND r.run_id IN (
-                        SELECT entity_id FROM tags
-                        WHERE entity_type = 'run'
-                        AND tag_name = ? AND tag_value = ?
-                    )
-                """
-                params.extend([tag_name, tag_value])
-
-        order = "ASC" if minimize else "DESC"
-        query += f" ORDER BY m.metric_value {order} LIMIT 1"
-
-        cursor.execute(query, params)
-        row = cursor.fetchone()
-
+    def _require_run(self, run: int) -> int:
+        run_id = _entity_id(run)
+        row = self.conn.execute("SELECT 1 FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if row is None:
-            return None
+            raise ValueError(f"run {run_id} does not exist")
+        return run_id
 
-        run_id = row[0]
-        all_runs = self.get_all_runs(experiment_id)
-        return next((r for r in all_runs if r["run_id"] == run_id), None)
+    # ----- reads -----
 
-    def latest_runs(
-        self,
-        experiment_id: int,
-        n: int = 1,
-        since: str | None = None,
-        after_run: int | None = None,
-    ) -> list[dict]:
-        """Get the most recent runs from an experiment.
+    RUN_ORDER_COLUMNS = ("run_id", "name", "status", "started_at", "ended_at")
 
-        Args:
-            experiment_id: The experiment to query.
-            n: Maximum number of runs to return (default 1).
-            since: ISO timestamp string; only return runs started after this time.
-            after_run: Run ID; only return runs started after this run.
+    @staticmethod
+    def _dims_filter(column: str, dims: Mapping[str, Any] | None) -> tuple[str, list[Any]]:
+        """Match rows whose dims include every given key and value.
 
-        Returns:
-            List of run data dicts, ordered by start time descending (most recent first).
+        Subset semantics, so dims={"h": 6} selects everything at lead 6 regardless of what
+        else keys the row. The json path is bound as a value, not interpolated.
         """
-        cursor = self.conn.cursor()
+        if not dims:
+            return "", []
+        clauses, params = [], []
+        for key, value in sorted(dims.items()):
+            clauses.append(f"json_extract({column}, ?) = ?")
+            params.extend([f"$.{key}", value])
+        return " AND " + " AND ".join(clauses), params
 
-        query = """
-            SELECT run_id FROM runs
-            WHERE experiment_id = ?
+    @staticmethod
+    def _tags_filter(
+        entity_type: str, id_column: str, tags: Mapping[str, Any] | None
+    ) -> tuple[str, list[Any]]:
+        """One EXISTS per tag.
+
+        The previous version ANDed conditions against a single joined alias, so no row
+        could satisfy two tags and any filter of two or more returned nothing.
         """
-        params: list = [experiment_id]
+        if not tags:
+            return "", []
+        clauses, params = [], []
+        for name, value in sorted(tags.items()):
+            clauses.append(
+                "EXISTS (SELECT 1 FROM tags t WHERE t.entity_type = ?"
+                f" AND t.entity_id = {id_column} AND t.name = ? AND t.value = ?)"
+            )
+            params.extend([entity_type, name, "" if value is None else str(value)])
+        return " AND " + " AND ".join(clauses), params
 
-        if after_run is not None:
-            query += " AND run_id > ?"
-            params.append(after_run)
-        elif since is not None:
-            query += " AND run_start_time > ?"
-            params.append(since)
+    def _expand_dims(self, row: sqlite3.Row, base: Sequence[str]) -> dict[str, Any]:
+        out = {key: row[key] for key in base}
+        parsed = json.loads(row["dims"])
+        out["dims"] = parsed
+        for key, value in parsed.items():
+            if key not in out:
+                out[key] = value
+        return out
 
-        query += " ORDER BY run_id DESC"
+    def get_experiment(self, experiment: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM experiments WHERE experiment_id = ?",
+            (_entity_id(experiment),),
+        ).fetchone()
+        return None if row is None else dict(row)
 
-        if after_run is None and since is None:
+    def experiments(
+        self, name: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT e.*, COUNT(r.run_id) AS runs FROM experiments e"
+            " LEFT JOIN runs r ON r.experiment_id = e.experiment_id"
+        )
+        params: list[Any] = []
+        if name:
+            query += " WHERE e.name LIKE ?"
+            params.append(f"%{name}%")
+        query += " GROUP BY e.experiment_id ORDER BY e.experiment_id DESC"
+        if limit:
             query += " LIMIT ?"
-            params.append(n)
+            params.append(int(limit))
+        return [dict(row) for row in self.conn.execute(query, params)]
 
-        cursor.execute(query, params)
-        run_ids = [row[0] for row in cursor.fetchall()]
+    def latest_experiment(self, name: str | None = None) -> dict[str, Any] | None:
+        """The newest experiment, optionally of one name.
 
-        all_runs = self.get_all_runs(experiment_id)
-        run_map = {r["run_id"]: r for r in all_runs}
+        Replaces the max(experiment_id) query that every consumer had to write itself.
+        """
+        found = self.experiments(name=name, limit=1)
+        return found[0] if found else None
 
-        return [run_map[rid] for rid in run_ids if rid in run_map]
+    def get_run(self, run: int) -> dict[str, Any] | None:
+        found = self.runs(run_id=_entity_id(run))
+        return found[0] if found else None
+
+    def runs(
+        self,
+        experiment: int | Mapping[str, Any] | None = None,
+        name: str | None = None,
+        tags: Mapping[str, Any] | None = None,
+        status: str | None = None,
+        since: str | None = None,
+        run_id: int | None = None,
+        order_by: str = "run_id",
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Runs, across experiments when experiment is None.
+
+        Every comparison used to be scoped to one experiment, but a model appears once per
+        experiment, so the interesting axis is between them.
+        """
+        column, _, direction = order_by.partition(" ")
+        if column not in self.RUN_ORDER_COLUMNS:
+            raise ValueError(f"order_by must name one of {self.RUN_ORDER_COLUMNS}")
+        direction = "DESC" if direction.lower() == "desc" else "ASC"
+
+        query = "SELECT r.* FROM runs r WHERE 1 = 1"
+        params: list[Any] = []
+        if experiment is not None:
+            query += " AND r.experiment_id = ?"
+            params.append(_entity_id(experiment))
+        if run_id is not None:
+            query += " AND r.run_id = ?"
+            params.append(int(run_id))
+        if name:
+            query += " AND r.name = ?"
+            params.append(name)
+        if status:
+            query += " AND r.status = ?"
+            params.append(status)
+        if since:
+            query += " AND r.started_at >= ?"
+            params.append(since)
+        clause, tag_params = self._tags_filter("run", "r.run_id", tags)
+        query += clause
+        params.extend(tag_params)
+        query += f" ORDER BY r.{column} {direction}"
+        if limit:
+            query += " LIMIT ?"
+            params.append(int(limit))
+
+        rows = [dict(row) for row in self.conn.execute(query, params)]
+        if not rows:
+            return []
+        for row in rows:
+            row["params"] = json.loads(row["params"]) if row["params"] else {}
+            row["tags"] = {}
+        by_id = {row["run_id"]: row for row in rows}
+        placeholders = ",".join("?" * len(by_id))
+        for tag in self.conn.execute(
+            "SELECT entity_id, name, value FROM tags WHERE entity_type = 'run'"
+            f" AND entity_id IN ({placeholders})",
+            list(by_id),
+        ):
+            by_id[tag["entity_id"]]["tags"][tag["name"]] = tag["value"]
+        return rows
+
+    def metrics(
+        self,
+        experiment: int | Mapping[str, Any] | None = None,
+        runs: int | Sequence[int] | None = None,
+        metric: str | None = None,
+        dims: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Tidy metric rows with dims expanded into columns.
+
+        A dim whose name collides with a base column stays available under the dims key.
+        """
+        query = (
+            "SELECT r.experiment_id, m.run_id, r.name AS run_name, m.metric, m.dims,"
+            " m.value FROM metrics m JOIN runs r ON r.run_id = m.run_id WHERE 1 = 1"
+        )
+        params: list[Any] = []
+        if experiment is not None:
+            query += " AND r.experiment_id = ?"
+            params.append(_entity_id(experiment))
+        if runs is not None:
+            ids = [runs] if isinstance(runs, int) else list(runs)
+            query += f" AND m.run_id IN ({','.join('?' * len(ids))})"
+            params.extend(int(i) for i in ids)
+        if metric:
+            query += " AND m.metric = ?"
+            params.append(metric)
+        clause, dim_params = self._dims_filter("m.dims", dims)
+        query += clause
+        params.extend(dim_params)
+        query += " ORDER BY m.run_id, m.metric, m.dims"
+        base = ("experiment_id", "run_id", "run_name", "metric", "value")
+        return [self._expand_dims(row, base) for row in self.conn.execute(query, params)]
+
+    def predictions(
+        self,
+        runs: int | Sequence[int] | None = None,
+        experiment: int | Mapping[str, Any] | None = None,
+        dims: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT r.experiment_id, p.run_id, r.name AS run_name, p.dims,"
+            " p.prediction, p.actual FROM predictions p"
+            " JOIN runs r ON r.run_id = p.run_id WHERE 1 = 1"
+        )
+        params: list[Any] = []
+        if experiment is not None:
+            query += " AND r.experiment_id = ?"
+            params.append(_entity_id(experiment))
+        if runs is not None:
+            ids = [runs] if isinstance(runs, int) else list(runs)
+            query += f" AND p.run_id IN ({','.join('?' * len(ids))})"
+            params.extend(int(i) for i in ids)
+        clause, dim_params = self._dims_filter("p.dims", dims)
+        query += clause
+        params.extend(dim_params)
+        query += " ORDER BY p.run_id, p.prediction_id"
+        base = ("experiment_id", "run_id", "run_name", "prediction", "actual")
+        return [self._expand_dims(row, base) for row in self.conn.execute(query, params)]
+
+    def tags(self, entity_type: str, entity_id: int) -> dict[str, str]:
+        if entity_type not in ENTITY_TYPES:
+            raise ValueError(f"entity_type must be one of {ENTITY_TYPES}")
+        return {
+            row["name"]: row["value"]
+            for row in self.conn.execute(
+                "SELECT name, value FROM tags WHERE entity_type = ? AND entity_id = ?"
+                " ORDER BY name",
+                (entity_type, _entity_id(entity_id)),
+            )
+        }
+
+    def best(
+        self,
+        experiment: int | Mapping[str, Any] | None,
+        metric: str,
+        dims: Mapping[str, Any] | None = None,
+        maximize: bool = False,
+        tags: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """The run with the lowest value of metric, or the highest when maximize is set.
+
+        Minimizing is the default because the usual metric is an error. The old default
+        disagreed with its own command line flag, which answered with the worst run.
+        """
+        candidates = self.metrics(experiment=experiment, metric=metric, dims=dims)
+        if tags is not None:
+            allowed = {row["run_id"] for row in self.runs(experiment=experiment, tags=tags)}
+            candidates = [row for row in candidates if row["run_id"] in allowed]
+        if not candidates:
+            return None
+        winner = (max if maximize else min)(candidates, key=lambda row: row["value"])
+        run = self.get_run(winner["run_id"])
+        if run is None:
+            return None
+        run["metric"] = metric
+        run["value"] = winner["value"]
+        run["dims"] = winner["dims"]
+        return run
+
+    def compare(
+        self,
+        run_ids: Sequence[int],
+        metrics: Sequence[str] | None = None,
+        dims: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """One row per metric and dims, one column per run, with a delta for two runs.
+
+        This is the pivot every consumer retyped by hand to decide keep or revert.
+        """
+        ids = [_entity_id(r) for r in run_ids]
+        if len(ids) < 2:
+            raise ValueError("compare needs at least 2 runs")
+        rows = self.metrics(runs=ids, dims=dims)
+        if metrics:
+            wanted = set(metrics)
+            rows = [row for row in rows if row["metric"] in wanted]
+
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            key = (row["metric"], dims_key(row["dims"]))
+            entry = grouped.setdefault(key, {"metric": row["metric"], "dims": row["dims"]})
+            entry[str(row["run_id"])] = row["value"]
+
+        out = []
+        for key in sorted(grouped):
+            entry = grouped[key]
+            if len(ids) == 2:
+                first, second = entry.get(str(ids[0])), entry.get(str(ids[1]))
+                entry["delta"] = None if first is None or second is None else second - first
+            out.append(entry)
+        return out
+
+    def audit(
+        self, run: int, metric: str, dims: Mapping[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """Recompute a stored metric from the prediction rows that support it.
+
+        This is the reason prediction rows are kept in the same file as the metrics: a
+        published number should be checkable, not merely recorded.
+        """
+        from . import scoring
+
+        if metric not in scoring.SCORERS:
+            raise ValueError(f"cannot recompute {metric}; known: {sorted(scoring.SCORERS)}")
+        stored = self.metrics(runs=_entity_id(run), metric=metric, dims=dims)
+        exact = [row for row in stored if not dims or row["dims"] == dict(dims)]
+        rows = [
+            row
+            for row in self.predictions(runs=_entity_id(run), dims=dims)
+            if row["actual"] is not None
+        ]
+        if not rows:
+            return None
+        recomputed = scoring.SCORERS[metric](
+            [row["prediction"] for row in rows], [row["actual"] for row in rows]
+        )
+        stored_value = exact[0]["value"] if exact else None
+        return {
+            "run_id": _entity_id(run),
+            "metric": metric,
+            "dims": dict(dims or {}),
+            "rows": len(rows),
+            "stored": stored_value,
+            "recomputed": recomputed,
+            "agrees": stored_value is not None
+            and abs(stored_value - recomputed) <= 1e-9 * max(1.0, abs(stored_value)),
+        }
+
+    def artifacts(
+        self, experiment: int | None = None, run: int | None = None
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT artifact_id, experiment_id, run_id, kind, filename,"
+            " LENGTH(data) AS bytes, created_at FROM artifacts WHERE 1 = 1"
+        )
+        params: list[Any] = []
+        if experiment is not None:
+            query += " AND experiment_id = ?"
+            params.append(_entity_id(experiment))
+        if run is not None:
+            query += " AND run_id = ?"
+            params.append(_entity_id(run))
+        query += " ORDER BY artifact_id"
+        return [dict(row) for row in self.conn.execute(query, params)]
+
+    def artifact_data(self, artifact_id: int) -> bytes:
+        row = self.conn.execute(
+            "SELECT data FROM artifacts WHERE artifact_id = ?", (int(artifact_id),)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"artifact {artifact_id} does not exist")
+        return row["data"]
+
+    def snapshot(
+        self,
+        experiment: int | Mapping[str, Any],
+        directory: str,
+        predictions: bool = False,
+    ) -> str:
+        """Write the experiment as deterministic files meant to be committed.
+
+        The database is a working file that .gitignore excludes, so it cannot be the
+        citation for a published number. These files can: sorted rows, stable columns, and
+        the commit that produced them in experiment.json.
+
+        Prediction rows are omitted by default. That keeps the committed record small and
+        leaves metrics auditable from the database rather than from the snapshot.
+        """
+        experiment_id = _entity_id(experiment)
+        record = self.get_experiment(experiment_id)
+        if record is None:
+            raise ValueError(f"experiment {experiment_id} does not exist")
+        os.makedirs(directory, exist_ok=True)
+
+        record["tags"] = self.tags("experiment", experiment_id)
+        record["artifacts"] = [
+            {k: v for k, v in row.items() if k != "data"}
+            for row in self.artifacts(experiment=experiment_id)
+        ]
+        with open(os.path.join(directory, "experiment.json"), "w") as stream:
+            json.dump(record, stream, indent=2, sort_keys=True, default=str)
+            stream.write("\n")
+
+        run_rows = self.runs(experiment=experiment_id, order_by="run_id")
+        _write_csv(
+            os.path.join(directory, "runs.csv"),
+            [
+                "run_id",
+                "name",
+                "status",
+                "started_at",
+                "ended_at",
+                "note",
+                "error",
+                "params",
+                "tags",
+            ],
+            [
+                {
+                    **{
+                        k: row[k]
+                        for k in (
+                            "run_id",
+                            "name",
+                            "status",
+                            "started_at",
+                            "ended_at",
+                            "note",
+                            "error",
+                        )
+                    },
+                    "params": json.dumps(row["params"], sort_keys=True),
+                    "tags": json.dumps(row["tags"], sort_keys=True),
+                }
+                for row in run_rows
+            ],
+        )
+
+        _write_csv(
+            os.path.join(directory, "metrics.csv"),
+            ["run_id", "run_name", "metric", "dims", "value"],
+            [
+                {
+                    "run_id": row["run_id"],
+                    "run_name": row["run_name"],
+                    "metric": row["metric"],
+                    "dims": dims_key(row["dims"]),
+                    "value": row["value"],
+                }
+                for row in sorted(
+                    self.metrics(experiment=experiment_id),
+                    key=lambda r: (r["run_id"], r["metric"], dims_key(r["dims"])),
+                )
+            ],
+        )
+
+        if predictions:
+            _write_csv(
+                os.path.join(directory, "predictions.csv"),
+                ["run_id", "run_name", "dims", "prediction", "actual"],
+                [
+                    {
+                        "run_id": row["run_id"],
+                        "run_name": row["run_name"],
+                        "dims": dims_key(row["dims"]),
+                        "prediction": row["prediction"],
+                        "actual": row["actual"],
+                    }
+                    for row in self.predictions(experiment=experiment_id)
+                ],
+            )
+        return directory
+
+
+def _write_csv(path: str, columns: Sequence[str], rows: Iterable[Mapping[str, Any]]) -> None:
+    import csv
+
+    with open(path, "w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(columns), extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: "" if row.get(k) is None else row.get(k) for k in columns})

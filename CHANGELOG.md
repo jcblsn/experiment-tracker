@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.1
+
+- `experiment()` accepts an explicit `provenance` mapping, for importing a run that
+  happened elsewhere. Without it the captured commit describes the import rather than the
+  work, which is worse than recording no commit at all.
+
 ## 2.0.0
 
 A breaking rework, aimed at reading. The previous version was written to far more often

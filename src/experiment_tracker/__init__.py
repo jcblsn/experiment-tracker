@@ -4,7 +4,6 @@ from .experiment_tracker import (
     RunHandle,
     default_serializer,
     dims_key,
-    provenance,
 )
 
 __all__ = [
@@ -12,6 +11,5 @@ __all__ = [
     "RunHandle",
     "default_serializer",
     "dims_key",
-    "provenance",
     "scoring",
 ]

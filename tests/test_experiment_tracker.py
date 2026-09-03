@@ -85,6 +85,24 @@ class TestExperiments(TrackerTestCase):
         self.assertIn("argv", record)
         self.assertIn("git_commit", record)
 
+    def test_explicit_provenance_wins_for_an_imported_run(self) -> None:
+        """Importing a historical record must not stamp the importer's commit on it."""
+        experiment_id = self.tracker.experiment(
+            "imported",
+            provenance={"git_commit": "4b86efd0", "git_dirty": 0, "argv": "gsl-cv"},
+        )
+        record = self.tracker.get_experiment(experiment_id)
+        self.assertEqual("4b86efd0", record["git_commit"])
+        self.assertEqual("gsl-cv", record["argv"])
+
+    def test_partial_provenance_keeps_the_captured_rest(self) -> None:
+        experiment_id = self.tracker.experiment(
+            "imported", provenance={"git_commit": "4b86efd0"}
+        )
+        record = self.tracker.get_experiment(experiment_id)
+        self.assertEqual("4b86efd0", record["git_commit"])
+        self.assertTrue(record["python"])
+
     def test_get_or_create_reuses_the_newest_of_a_name(self) -> None:
         first = self.tracker.experiment("loop", get_or_create=True)
         second = self.tracker.experiment("loop", get_or_create=True)

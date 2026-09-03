@@ -120,7 +120,7 @@ def _git(args: Sequence[str]) -> str | None:
     return out.stdout.strip() if out.returncode == 0 else None
 
 
-def provenance() -> dict[str, Any]:
+def _provenance() -> dict[str, Any]:
     """What is needed to rebuild a run: the commit, whether the tree was dirty, the command.
 
     A date alone is not a vintage. Outside a work tree the git fields are None rather than
@@ -225,11 +225,16 @@ class ExperimentTracker:
         note: str | None = None,
         tags: Mapping[str, Any] | None = None,
         get_or_create: bool = False,
+        provenance: Mapping[str, Any] | None = None,
     ) -> int:
         """Create an experiment and record how it was produced.
 
         get_or_create returns the newest experiment of this name instead of adding another,
         which is what one long-lived named benchmark needs.
+
+        provenance overrides the captured values. Give it only when importing a run that
+        happened elsewhere: the captured commit would then describe the import rather than
+        the work, which is worse than no commit at all.
         """
         if get_or_create:
             row = self.conn.execute(
@@ -242,7 +247,7 @@ class ExperimentTracker:
                     self.log_tags("experiment", row["experiment_id"], tags)
                 return int(row["experiment_id"])
 
-        prov = provenance()
+        prov = {**_provenance(), **(provenance or {})}
         cursor = self.conn.execute(
             "INSERT INTO experiments (name, description, note, git_commit, git_dirty,"
             " argv, python) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -250,10 +255,10 @@ class ExperimentTracker:
                 name,
                 description,
                 note,
-                prov["git_commit"],
-                prov["git_dirty"],
-                prov["argv"],
-                prov["python"],
+                prov.get("git_commit"),
+                prov.get("git_dirty"),
+                prov.get("argv"),
+                prov.get("python"),
             ),
         )
         experiment_id = int(cursor.lastrowid)

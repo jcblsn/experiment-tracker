@@ -1,6 +1,6 @@
 [project]
 name = "experiment-tracker"
-version = "2.0.0"
+version = "2.0.1"
 description = "Lightweight experiment tracking on SQLite, with no dependencies"
 readme = "README.md"
 authors = [

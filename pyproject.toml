@@ -1,7 +1,7 @@
 [project]
 name = "experiment-tracker"
-version = "1.0.0"
-description = "Lightweight experiment tracking"
+version = "2.0.0"
+description = "Lightweight experiment tracking on SQLite, with no dependencies"
 readme = "README.md"
 authors = [
     { name = "Jacob Eliason", email = "jacobeliason@gmail.com" }
@@ -26,8 +26,9 @@ dev = [
     "numpy>=2.2.3"
 ]
 
-[tool.hatch.build]
-include = [
-    "src/*.py",
-    "src/*.sql",
-]
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

@@ -9,4 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
-sample_implementation/
+# Working databases
+*.db
+*.db-wal
+*.db-shm
+
+.ruff_cache/
